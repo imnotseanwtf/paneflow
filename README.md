@@ -59,9 +59,13 @@ paneflow wait --match claude-impl --pattern "REPORT_DONE"
 paneflow watch --type ai.stop
 ```
 
-`paneflow up` spawns a declarative workspace. `paneflow flow run` executes the steps you define in `flow.toml`: spawn panes or send text, order steps through dependencies, wait for readiness patterns, and capture output. Launching panes with commands or prompts requires `PANEFLOW_IPC_ORCHESTRATION=1` or `PANEFLOW_IPC_SCRIPTING=1`. Prompt submission remains explicit and permission-gated.
+`paneflow up` spawns a declarative workspace. `paneflow flow run` executes the steps you define in `flow.toml`: spawn panes or send text, order steps through dependencies, wait for readiness patterns, and capture output. Pane orchestration is enabled by default; set `PANEFLOW_IPC_ORCHESTRATION=0` to disable it unless scripting or AI free access grants it. Prompt submission remains explicit and permission-gated.
 
 [Conductor docs →](docs/user/conductor.md)
+
+To build your changes on GitHub, push to `main` or run **Actions > Linux
+preview > Run workflow**. Download the unsigned Linux packages from that
+run's **Artifacts** section. [Preview build instructions →](docs/release/runbook.md#workflow-layout)
 
 ### 4. Configure
 

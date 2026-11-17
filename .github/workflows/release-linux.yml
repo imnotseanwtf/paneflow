@@ -1,6 +1,5 @@
 name: release-linux
 
-# Called by `release.yml`, never on its own.
 # The two Linux legs and the auto-update end-to-end test.
 # It receives only the secrets of its platform, by name. A job that signs
 # declares the `release` environment, whose deployment policy admits `main`

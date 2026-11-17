@@ -1,0 +1,23 @@
+name: Linux preview
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Build unsigned Linux packages
+    uses: ./.github/workflows/release-linux.yml
+    with:
+      sha: ${{ github.sha }}
+      tag: ${{ format('v0.0.0-preview.{0}', github.sha) }}
+      mode: dry-run
+      signed: false

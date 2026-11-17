@@ -9,14 +9,7 @@ fn scripting_enabled_from(value: Option<&str>) -> bool {
 }
 
 pub(super) fn ipc_orchestration_enabled() -> bool {
-    orchestration_enabled_from(
-        std::env::var("PANEFLOW_IPC_ORCHESTRATION").ok().as_deref(),
-        std::env::var("PANEFLOW_IPC_SCRIPTING").ok().as_deref(),
-    )
-}
-
-fn orchestration_enabled_from(orchestration: Option<&str>, scripting: Option<&str>) -> bool {
-    matches!(orchestration, Some("1")) || scripting_enabled_from(scripting)
+    paneflow_host::control::ControlPermissions::from_environment(false, true).orchestration
 }
 
 fn env_param_has_strings(value: Option<&serde_json::Value>) -> bool {
@@ -214,14 +207,6 @@ mod tests {
             "free-access mode opens it without the env gate"
         );
         assert!(super::send_text_gate_open(true, true));
-    }
-
-    #[test]
-    fn orchestration_gate_accepts_specific_gate_or_scripting_superset() {
-        assert!(!super::orchestration_enabled_from(None, None));
-        assert!(!super::orchestration_enabled_from(Some("0"), Some("0")));
-        assert!(super::orchestration_enabled_from(Some("1"), None));
-        assert!(super::orchestration_enabled_from(None, Some("1")));
     }
 
     #[test]

@@ -462,6 +462,14 @@ event types. The `paneflow`
 CLI (`paneflow up`, `paneflow flow`, `paneflow watch`, `paneflow wait`) is
 built on the same socket.
 
+Pane orchestration is enabled by default. `ControlPermissions` in
+`crates/paneflow-host/src/control.rs` owns the environment policy for both the
+host and the desktop. `PANEFLOW_IPC_ORCHESTRATION=0` disables orchestration;
+`PANEFLOW_IPC_SCRIPTING=1` and AI free access can still grant it. Scripting
+remains disabled by default, so enabling orchestration does not authorize input
+to an existing pane. Same-user local clients may launch commands in new panes
+and explicitly request cross-workspace scope when orchestration is enabled.
+
 Handlers run on the GPUI thread, so none of them waits on a terminal runtime.
 `surface.read` and `surface.search` resolve their pane there, then hand a
 windowed read or a bounded search to a blocking worker that sends the reply

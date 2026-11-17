@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::path::Path;
 
 use paneflow_agent_config::runtime_catalog::{RuntimeHookAdapter, runtime_for_tool};
@@ -71,9 +72,22 @@ pub struct ControlPermissions {
 
 impl ControlPermissions {
     pub fn from_environment(unrestricted: bool, fenced_reads: bool) -> Self {
-        let scripting = std::env::var("PANEFLOW_IPC_SCRIPTING").as_deref() == Ok("1");
-        let orchestration =
-            scripting || std::env::var("PANEFLOW_IPC_ORCHESTRATION").as_deref() == Ok("1");
+        Self::from_values(
+            std::env::var_os("PANEFLOW_IPC_SCRIPTING").as_deref(),
+            std::env::var_os("PANEFLOW_IPC_ORCHESTRATION").as_deref(),
+            unrestricted,
+            fenced_reads,
+        )
+    }
+
+    fn from_values(
+        scripting: Option<&OsStr>,
+        orchestration: Option<&OsStr>,
+        unrestricted: bool,
+        fenced_reads: bool,
+    ) -> Self {
+        let scripting = scripting.is_some_and(|value| value == "1");
+        let orchestration = orchestration.is_none_or(|value| value == "1") || scripting;
         Self {
             scripting: scripting || unrestricted,
             orchestration: orchestration || unrestricted,
@@ -1010,7 +1024,7 @@ mod tests {
     }
 
     #[test]
-    fn permissions_default_closed_until_an_operator_opens_them() {
+    fn scripting_stays_closed_until_an_operator_opens_it() {
         let closed = ControlPermissions {
             scripting: false,
             orchestration: false,
@@ -1030,6 +1044,37 @@ mod tests {
         assert!(
             ControlPermissions::from_environment(true, true).scripting,
             "free access opens the gate without the env switch"
+        );
+    }
+
+    #[test]
+    fn orchestration_defaults_on_without_enabling_scripting() {
+        let permissions = ControlPermissions::from_values(None, None, false, true);
+        assert!(permissions.orchestration);
+        assert!(!permissions.scripting);
+        assert!(permissions.fenced_reads);
+        assert_eq!(
+            create_gate(&json!({"command": "claude"}), permissions),
+            Ok(())
+        );
+        assert!(send_text_gate(permissions).is_err());
+    }
+
+    #[test]
+    fn orchestration_respects_explicit_values_and_permission_overrides() {
+        for value in ["0", "", "true", "invalid"] {
+            let value = Some(OsStr::new(value));
+            let closed = ControlPermissions::from_values(None, value, false, true);
+            assert!(!closed.orchestration, "{value:?}");
+            assert!(create_gate(&json!({"command": "claude"}), closed).is_err());
+            assert!(
+                ControlPermissions::from_values(Some(OsStr::new("1")), value, false, true)
+                    .orchestration
+            );
+            assert!(ControlPermissions::from_values(None, value, true, true).orchestration);
+        }
+        assert!(
+            ControlPermissions::from_values(None, Some(OsStr::new("1")), false, true).orchestration
         );
     }
 }

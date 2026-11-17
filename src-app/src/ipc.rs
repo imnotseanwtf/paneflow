@@ -120,15 +120,13 @@ pub fn start_server() -> (
     IpcStatus,
     Arc<crate::ipc_events::EventBus>,
 ) {
-    let scripting_enabled = std::env::var("PANEFLOW_IPC_SCRIPTING").as_deref() == Ok("1");
-    let orchestration_enabled =
-        scripting_enabled || std::env::var("PANEFLOW_IPC_ORCHESTRATION").as_deref() == Ok("1");
-    if scripting_enabled {
+    let permissions = paneflow_host::control::ControlPermissions::from_environment(false, true);
+    if permissions.scripting {
         tracing::warn!(
             "ipc.scripting_enabled is ON; any same-UID process can inject keystrokes into agent panes"
         );
     }
-    if orchestration_enabled {
+    if permissions.orchestration {
         tracing::warn!(
             "ipc.orchestration_enabled is ON; any same-UID process can create panes with commands, prompts, or env"
         );

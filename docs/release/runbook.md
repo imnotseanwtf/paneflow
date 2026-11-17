@@ -345,10 +345,30 @@ it by hand. Both commands must exit 0 and print `paneflow X.Y.Z`.
 
 ## Workflow layout
 
-`release.yml` is the orchestrator and the only file that triggers. It holds
+`preview-linux.yml` builds unsigned Linux packages on every push to `main`,
+and can also be run from **Actions > Linux preview > Run workflow**. It calls
+the existing `release-linux.yml` with the exact commit SHA, `mode: dry-run`
+and `signed: false`, passes no secrets, and publishes no GitHub release.
+The normal `run_tests` workflow still checks pushes and pull requests to
+`main`; check its result for the same commit before using a preview.
+
+Download `release-assets-x86_64-Linux` or `release-assets-aarch64-Linux` from
+the preview run's **Artifacts** section within seven days. Each contains an
+AppImage, tarball, `.deb`, `.rpm`, and SHA-256 sidecars. Filenames include
+`0.0.0-preview.<commit>`; the binary and package metadata keep the version in
+`Cargo.toml`, so a preview package is not necessarily an upgrade over an
+installed package with the same version. Use the AppImage for a quick local
+test: verify its sidecar with `sha256sum -c <filename>.sha256`, make it
+executable with `chmod +x <filename>.AppImage`, quit the installed app with
+**Keep sessions running**, and launch the AppImage. These previews are
+unsigned and do not enter the signed release or package repository streams.
+Automatic updates require the repository's `PANEFLOW_MINISIGN_PUBKEY`
+verification variable; without it, update verification stays closed.
+
+`release.yml` is the signed release orchestrator. It holds
 `preflight`, `ci-verdict`, one call per platform, the Linux package smoke
 matrix, the dry-run summary and the publish job. The builds live in three
-reusable workflows, which nothing else calls:
+reusable workflows; `preview-linux.yml` also calls the Linux workflow:
 
 | File | Jobs | Secrets it receives |
 |---|---|---|

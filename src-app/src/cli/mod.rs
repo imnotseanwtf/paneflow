@@ -306,7 +306,7 @@ enum Commands {
             long,
             value_parser = ["workspace", "all"],
             default_value = "workspace",
-            help = "From inside a Paneflow pane, writes stay in that pane's workspace. `all` reaches every workspace and needs PANEFLOW_IPC_ORCHESTRATION=1 on the instance"
+            help = "From inside a Paneflow pane, writes stay in that pane's workspace. `all` reaches every workspace and requires orchestration, enabled by default"
         )]
         scope: String,
     },
@@ -328,7 +328,7 @@ enum Commands {
             long,
             value_parser = ["workspace", "all"],
             default_value = "workspace",
-            help = "From inside a Paneflow pane, keystrokes stay in that pane's workspace. `all` reaches every workspace and needs PANEFLOW_IPC_ORCHESTRATION=1 on the instance"
+            help = "From inside a Paneflow pane, keystrokes stay in that pane's workspace. `all` reaches every workspace and requires orchestration, enabled by default"
         )]
         scope: String,
     },
@@ -457,7 +457,7 @@ enum FlowCommand {
             long,
             value_parser = ["workspace", "all"],
             default_value = "workspace",
-            help = "From inside a Paneflow pane, `send` steps that target a pane the flow did not spawn stay in that pane's workspace. `all` reaches every workspace and needs PANEFLOW_IPC_ORCHESTRATION=1 on the instance"
+            help = "From inside a Paneflow pane, `send` steps that target a pane the flow did not spawn stay in that pane's workspace. `all` reaches every workspace and requires orchestration, enabled by default"
         )]
         scope: String,
     },
