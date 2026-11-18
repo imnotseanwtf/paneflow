@@ -72,6 +72,17 @@ ignore = [
     # ttf-parser: switch the direct dependency to the same successor and
     # drop this entry.
     "RUSTSEC-2026-0192",
+    #
+    # RUSTSEC-2026-0543: `chrono` is unmaintained and the advisory lists
+    # no patched version. It is a notice, not a vulnerability: no
+    # exploitable defect is published. PaneFlow uses it for local
+    # timestamps and formatting, and GPUI and its scheduler depend on it
+    # too, so it cannot be dropped without moving the GPUI pin. Re-evaluate
+    # when the advisory names a vulnerability or a successor crate, or when
+    # a GPUI bump drops chrono: then migrate the direct uses in
+    # paneflow-app and paneflow-serve to the same successor and remove
+    # this entry.
+    "RUSTSEC-2026-0543",
 ]
 
 [licenses]
