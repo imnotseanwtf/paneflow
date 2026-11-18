@@ -21,3 +21,46 @@ jobs:
       tag: ${{ format('v0.0.0-preview.{0}', github.sha) }}
       mode: dry-run
       signed: false
+
+  publish:
+    name: Publish preview pre-release
+    needs: linux
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download preview packages
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-assets-*-Linux
+          path: preview-assets
+          merge-multiple: true
+
+      - name: Publish pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          TAG: ${{ format('preview-{0}', github.run_number) }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" preview-assets/* \
+            --repo "$REPO" \
+            --target "$SHA" \
+            --prerelease \
+            --title "Preview ${SHA::8}" \
+            --notes "Unsigned Linux preview build of ${SHA}. Not a signed release and not an upgrade stream."
+
+      - name: Prune old previews
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release list --repo "$REPO" --limit 100 --json tagName,isPrerelease \
+            --jq '[.[] | select(.isPrerelease and (.tagName | startswith("preview-")))] | .[5:] | .[].tagName' |
+            while read -r old; do
+              gh release delete "$old" --repo "$REPO" --cleanup-tag --yes
+            done
