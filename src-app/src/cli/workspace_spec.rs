@@ -16,6 +16,8 @@ pub struct WorkspaceSpec {
     #[serde(default)]
     pub port_base: Option<u16>,
     #[serde(default)]
+    pub round_robin: bool,
+    #[serde(default)]
     pub panes: Vec<PaneSpec>,
 }
 
@@ -47,6 +49,10 @@ pub struct PaneSpec {
     pub cwd: Option<String>,
     #[serde(default)]
     pub agent: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
     #[serde(default)]
     pub command: Option<String>,
     #[serde(default)]
@@ -96,6 +102,9 @@ impl WorkspaceSpec {
 }
 
 pub(super) fn validate_pane(i: usize, pane: &PaneSpec) -> Result<(), String> {
+    if (pane.model.is_some() || pane.effort.is_some()) && pane.agent.is_none() {
+        return Err(format!("pane {i}: 'model' and 'effort' require 'agent'"));
+    }
     if pane.agent.is_some() && pane.command.is_some() {
         return Err(format!(
             "pane {i}: set either `agent` or `command`, not both"

@@ -645,7 +645,7 @@ impl PaneFlowApp {
         let mut rows = Vec::with_capacity(order.len());
         for i in order {
             let ws = &self.workspaces[i];
-            let Some(tabs) = sidebar_matching_tabs(ws, query) else {
+            let Some(mut tabs) = sidebar_matching_tabs(ws, query) else {
                 continue;
             };
             if self.sidebar_row_leaving(SidebarRow::Folder(i)) {
@@ -653,7 +653,23 @@ impl PaneFlowApp {
             }
             rows.push(SidebarRow::Folder(i));
             if (ws.sidebar_expanded || !query.is_empty()) && !ws.is_empty_shell() {
-                for tab_idx in tabs {
+                for index in tabs.clone() {
+                    let mut current = index;
+                    for _ in 0..ws.tab_count() {
+                        let Some(parent) = ws.parent_tab_index(current) else {
+                            break;
+                        };
+                        if !tabs.contains(&parent) {
+                            tabs.push(parent);
+                        }
+                        current = parent;
+                    }
+                }
+                for tab_idx in ws
+                    .tab_tree_order(!query.is_empty())
+                    .into_iter()
+                    .filter(|index| tabs.contains(index))
+                {
                     let row = SidebarRow::Tab(i, tab_idx);
                     if !self.sidebar_row_leaving(row) {
                         rows.push(row);
@@ -708,7 +724,10 @@ impl PaneFlowApp {
             .into_iter()
             .flat_map(|i| {
                 std::iter::once(SidebarRow::Folder(i)).chain(
-                    (0..self.workspaces[i].tab_count()).map(move |tab| SidebarRow::Tab(i, tab)),
+                    self.workspaces[i]
+                        .tab_tree_order(true)
+                        .into_iter()
+                        .map(move |tab| SidebarRow::Tab(i, tab)),
                 )
             })
             .collect();

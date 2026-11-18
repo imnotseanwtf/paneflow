@@ -149,6 +149,10 @@ const NAV_GROUPS: &[NavGroup] = &[
                     "codex",
                     "gemini",
                     "launcher",
+                    "role",
+                    "agency",
+                    "model",
+                    "effort",
                     "profile",
                     "permissions",
                 ],
@@ -433,7 +437,21 @@ impl PaneFlowApp {
             .text_size(px(26.))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(ui.text)
-            .child(section_title(section));
+            .child(if section == SettingsSection::Agents {
+                self.agent_profiles_project.as_ref().map_or_else(
+                    || "Agents".to_string(),
+                    |path| {
+                        format!(
+                            "{} agents",
+                            path.file_name()
+                                .unwrap_or(path.as_os_str())
+                                .to_string_lossy()
+                        )
+                    },
+                )
+            } else {
+                section_title(section).to_string()
+            });
         let title = if section == SettingsSection::Usage {
             self.render_usage_heading(title_text, window, cx)
         } else {
@@ -622,6 +640,9 @@ impl PaneFlowApp {
 
     fn enter_settings_section(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
         self.settings_section = Some(section);
+        self.agent_profiles_project = None;
+        self.agent_profile_editor = None;
+        self.agent_setup_review = None;
         self.settings_search_motion.borrow_mut().reset();
         self.reset_settings_scroll();
         self.font_dropdown_open = false;

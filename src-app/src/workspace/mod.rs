@@ -2,6 +2,7 @@ pub(crate) mod git;
 mod ports;
 pub mod surface_naming;
 mod tab;
+mod tab_hierarchy;
 pub mod worktree;
 
 pub use git::{
@@ -31,6 +32,7 @@ fn next_workspace_id() -> u64 {
 
 pub fn next_workspace_id_in(space: Option<&paneflow_config::schema::SpaceId>) -> u64 {
     let id = next_workspace_id();
+    register_durable_workspace_id(id, &paneflow_config::schema::WorkspaceId::new());
     record_workspace_space(id, space);
     id
 }
@@ -138,7 +140,10 @@ static DURABLE_WORKSPACE_IDS: std::sync::Mutex<
     std::collections::BTreeMap<u64, paneflow_config::schema::WorkspaceId>,
 > = std::sync::Mutex::new(std::collections::BTreeMap::new());
 
-fn register_durable_workspace_id(id: u64, durable: &paneflow_config::schema::WorkspaceId) {
+pub(crate) fn register_durable_workspace_id(
+    id: u64,
+    durable: &paneflow_config::schema::WorkspaceId,
+) {
     DURABLE_WORKSPACE_IDS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -196,7 +201,7 @@ impl Workspace {
             repo_root,
             worktree_root,
         } = GitLocation::unprobed(&cwd);
-        let durable_id = paneflow_config::schema::WorkspaceId::new();
+        let durable_id = durable_workspace_id(id).unwrap_or_default();
         register_durable_workspace_id(id, &durable_id);
         Self {
             id,
@@ -322,6 +327,7 @@ impl Workspace {
     pub fn set_active_tab(&mut self, idx: usize) {
         if idx < self.tabs.len() {
             self.active_tab_idx = idx;
+            self.reveal_tab_ancestors(idx);
         }
     }
 
@@ -336,7 +342,14 @@ impl Workspace {
         }
     }
 
-    pub fn open_tab(&mut self, tab: Tab) -> bool {
+    pub fn open_tab(&mut self, mut tab: Tab) -> bool {
+        if !self
+            .tabs
+            .iter()
+            .any(|parent| Some(parent.id) == tab.parent_id)
+        {
+            tab.parent_id = None;
+        }
         if self.is_empty_shell() {
             self.tabs[0] = tab;
             self.active_tab_idx = 0;
@@ -351,6 +364,7 @@ impl Workspace {
         }
         self.tabs.push(tab);
         self.active_tab_idx = self.tabs.len() - 1;
+        self.reveal_tab_ancestors(self.active_tab_idx);
         true
     }
 
@@ -376,6 +390,11 @@ impl Workspace {
             return None;
         }
         let removed = self.tabs.remove(idx);
+        for tab in &mut self.tabs {
+            if tab.parent_id == Some(removed.id) {
+                tab.parent_id = removed.parent_id;
+            }
+        }
         if self.tabs.is_empty() {
             self.tabs.push(Tab::empty());
             self.active_tab_idx = 0;
@@ -448,6 +467,10 @@ impl Workspace {
         self.tabs
             .iter()
             .map(|tab| TabSession {
+                parent_tab: tab
+                    .parent_id
+                    .and_then(|id| self.tabs.iter().position(|tab| tab.id == id)),
+                children_collapsed: tab.children_collapsed,
                 title: tab.title().to_string(),
                 title_source: Some(tab.title_source()),
                 layout: tab.serialize_without_scrollback(cx),
@@ -553,6 +576,15 @@ mod tests {
         saved.split_first_leaf(crate::layout::SplitDirection::Horizontal, hidden.clone());
         tab.saved_layout = Some(saved);
         tab
+    }
+
+    #[test]
+    fn workspace_identity_is_available_before_terminal_creation_and_survives_construction() {
+        let id = super::next_workspace_id_in(None);
+        let identity = super::durable_workspace_id(id).expect("reserved workspace identity");
+        let workspace = Workspace::empty_with_cwd_and_id(id, "lead", std::path::PathBuf::new());
+        assert_eq!(workspace.durable_id, identity);
+        assert_eq!(super::durable_workspace_id(id), Some(identity));
     }
 
     #[gpui::test]

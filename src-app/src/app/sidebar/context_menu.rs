@@ -59,6 +59,7 @@ pub(crate) enum WorkspaceMenuAction {
     Reveal,
     CopyPath,
     CustomButtons,
+    AgentSettings,
     MoveToSpace(Option<paneflow_config::schema::SpaceId>),
     MoveToNewSpace,
     MarkRead,
@@ -230,6 +231,11 @@ impl PaneFlowApp {
                     .icon(icon::PREFERENCES)
                     .mnemonic('b'),
             )
+            .item(
+                MenuItem::new("Agent settings…", WorkspaceMenuAction::AgentSettings)
+                    .icon(icon::PREFERENCES)
+                    .mnemonic('g'),
+            )
             .items((!self.cached_config.spaces.is_empty()).then(|| {
                 MenuItem::submenu("Move to space", self.space_menu(idx))
                     .icon(icon::MOVE_TO_SPACE)
@@ -379,6 +385,7 @@ impl PaneFlowApp {
             WorkspaceMenuAction::Reveal => self.reveal_workspace_in_file_manager(idx, cx),
             WorkspaceMenuAction::CopyPath => self.copy_workspace_path(idx, cx),
             WorkspaceMenuAction::CustomButtons => self.open_custom_buttons_modal(idx, window, cx),
+            WorkspaceMenuAction::AgentSettings => self.open_project_agent_settings(idx, window, cx),
             WorkspaceMenuAction::MoveToSpace(space) => {
                 self.move_workspace_to_space(idx, space.clone(), window, cx);
             }

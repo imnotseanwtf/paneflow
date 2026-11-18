@@ -89,6 +89,8 @@ fn is_inside_checkout(cwd: &std::path::Path, checkout: &std::path::Path) -> bool
 
 pub struct Tab {
     pub id: u64,
+    pub parent_id: Option<u64>,
+    pub children_collapsed: bool,
     title: String,
     title_source: TabTitleSource,
     pub root: Option<LayoutTree>,
@@ -102,6 +104,8 @@ impl Tab {
     pub fn new(title: impl Into<String>, root: Option<LayoutTree>) -> Self {
         Self {
             id: next_tab_id(),
+            parent_id: None,
+            children_collapsed: false,
             title: title.into(),
             title_source: TabTitleSource::Preset,
             root,

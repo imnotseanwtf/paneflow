@@ -551,6 +551,7 @@ fn install_integration_at(
     write_marker(paths, runtime.slug, adopted_from)?;
     let mut status = status_for(runtime, Some(paths));
     status.notes.extend(install_conductor_skill(paths, runtime));
+    status.notes.extend(install_agency_roles(paths, runtime));
     Ok(status)
 }
 
@@ -588,33 +589,43 @@ fn recorded_skill_fingerprint(paths: &ConfigPaths, slug: &str) -> Option<String>
 fn install_conductor_skill(paths: &ConfigPaths, runtime: &Runtime) -> Option<String> {
     let target = paths.conductor_skill(runtime)?;
     let skill = versioned_conductor_skill();
-    let result = match std::fs::read(&target) {
+    install_managed_text(paths, runtime.slug, &target, &skill, CONDUCTOR_SKILL)
+}
+
+fn install_managed_text(
+    paths: &ConfigPaths,
+    slug: &str,
+    target: &Path,
+    skill: &str,
+    label: &str,
+) -> Option<String> {
+    let result = match std::fs::read(target) {
         Ok(existing) if existing == skill.as_bytes() => Ok(None),
         Ok(existing)
-            if recorded_skill_fingerprint(paths, runtime.slug)
+            if recorded_skill_fingerprint(paths, slug)
                 .is_some_and(|recorded| recorded == fingerprint(&existing)) =>
         {
-            io::write_atomic(&target, skill.as_bytes()).map(|()| None)
+            io::write_atomic(target, skill.as_bytes()).map(|()| None)
         }
         Ok(_) => Ok(Some(format!(
-            "{}: kept your modified {CONDUCTOR_SKILL} skill; delete it and install again for the {} copy",
+            "{}: kept your modified {label} skill; delete it and install again for the {} copy",
             target.display(),
             env!("CARGO_PKG_VERSION")
         ))),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            io::write_atomic(&target, skill.as_bytes()).map(|()| None)
+            io::write_atomic(target, skill.as_bytes()).map(|()| None)
         }
         Err(error) => Err(anyhow::Error::from(error).context(format!("read {}", target.display()))),
     };
     let result = result.and_then(|note| {
         if note.is_none() {
-            write_skill_record(paths, runtime.slug, &target, skill.as_bytes())?;
+            write_skill_record(paths, slug, target, skill.as_bytes())?;
         }
         Ok(note)
     });
     result.unwrap_or_else(|error| {
         Some(format!(
-            "{}: the {CONDUCTOR_SKILL} skill was not installed: {error:#}",
+            "{}: the {label} skill was not installed: {error:#}",
             target.display()
         ))
     })
@@ -637,22 +648,37 @@ fn remove_conductor_skill(paths: &ConfigPaths, runtime: &Runtime) -> Result<Opti
     let Some(target) = paths.conductor_skill(runtime) else {
         return Ok(None);
     };
-    let record = paths.skill_record(runtime.slug);
-    let note = match std::fs::read(&target) {
+    remove_managed_text(
+        paths,
+        runtime.slug,
+        &target,
+        versioned_conductor_skill().as_bytes(),
+        CONDUCTOR_SKILL,
+    )
+}
+
+fn remove_managed_text(
+    paths: &ConfigPaths,
+    slug: &str,
+    target: &Path,
+    expected: &[u8],
+    label: &str,
+) -> Result<Option<String>> {
+    let record = paths.skill_record(slug);
+    let note = match std::fs::read(target) {
         Ok(existing)
-            if existing == versioned_conductor_skill().as_bytes()
-                || recorded_skill_fingerprint(paths, runtime.slug)
+            if existing == expected
+                || recorded_skill_fingerprint(paths, slug)
                     .is_some_and(|recorded| recorded == fingerprint(&existing)) =>
         {
-            std::fs::remove_file(&target)
-                .with_context(|| format!("remove {}", target.display()))?;
+            std::fs::remove_file(target).with_context(|| format!("remove {}", target.display()))?;
             if let Some(directory) = target.parent() {
                 let _ = std::fs::remove_dir(directory);
             }
             None
         }
         Ok(_) => Some(format!(
-            "{}: kept your modified {CONDUCTOR_SKILL} skill",
+            "{}: kept your modified {label} skill",
             target.display()
         )),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -666,6 +692,63 @@ fn remove_conductor_skill(paths: &ConfigPaths, runtime: &Runtime) -> Result<Opti
         }
     }
     Ok(note)
+}
+
+fn agency_documents(paths: &ConfigPaths, runtime: &Runtime) -> Vec<(PathBuf, String, String)> {
+    if runtime.integration.skills_dir != Some(RuntimeSkillsDir::Claude) {
+        return Vec::new();
+    }
+    let Some(config) = paths.claude_skills.parent() else {
+        return Vec::new();
+    };
+    let agents = config.join("agents");
+    let mut documents: Vec<_> = crate::agency::ROLES
+        .iter()
+        .filter(|role| crate::agency::STARTER_ROLES.contains(&role.id))
+        .map(|role| {
+            (
+                agents.join(format!("{}.md", role.agent_name())),
+                format!("{}-agency-{}", runtime.slug, role.id),
+                role.definition(),
+            )
+        })
+        .collect();
+    documents.push((
+        agents.join("PANEFLOW_AGENCY_LICENSE.txt"),
+        format!("{}-agency-license", runtime.slug),
+        crate::agency::LICENSE.to_string(),
+    ));
+    documents
+}
+
+fn install_agency_roles(paths: &ConfigPaths, runtime: &Runtime) -> Vec<String> {
+    agency_documents(paths, runtime)
+        .into_iter()
+        .filter_map(|(target, slug, text)| {
+            install_managed_text(paths, &slug, &target, &text, "Agency Agents")
+        })
+        .collect()
+}
+
+fn remove_agency_roles(paths: &ConfigPaths, runtime: &Runtime) -> Result<Vec<String>> {
+    let mut notes = Vec::new();
+    for (target, slug, text) in agency_documents(paths, runtime) {
+        if target
+            .file_name()
+            .is_some_and(|name| name == "PANEFLOW_AGENCY_LICENSE.txt")
+            && !notes.is_empty()
+        {
+            continue;
+        }
+        notes.extend(remove_managed_text(
+            paths,
+            &slug,
+            &target,
+            text.as_bytes(),
+            "Agency Agents",
+        )?);
+    }
+    Ok(notes)
 }
 
 fn preflight_install(
@@ -800,6 +883,7 @@ fn remove_integration_at(paths: &ConfigPaths, slug: &str) -> Result<IntegrationS
     }
     paths.mcp_writer(runtime)?.uninstall()?;
     let skill_note = remove_conductor_skill(paths, runtime)?;
+    let agency_notes = remove_agency_roles(paths, runtime)?;
     let marker = paths.marker(runtime.slug);
     if let Err(error) = std::fs::remove_file(&marker) {
         if error.kind() != std::io::ErrorKind::NotFound {
@@ -808,6 +892,7 @@ fn remove_integration_at(paths: &ConfigPaths, slug: &str) -> Result<IntegrationS
     }
     let mut status = status_for(runtime, Some(paths));
     status.notes.extend(skill_note);
+    status.notes.extend(agency_notes);
     Ok(status)
 }
 
@@ -2016,6 +2101,36 @@ mod tests {
 
     fn conductor_skill_path(paths: &ConfigPaths) -> PathBuf {
         paths.claude_skills.join(CONDUCTOR_SKILL).join("SKILL.md")
+    }
+
+    #[test]
+    fn agency_install_is_idempotent_and_keeps_custom_roles_and_their_license() {
+        let (_directory, paths, _binaries) = fixture();
+        let runtime = runtime_by_slug("claude-code").unwrap();
+        assert!(install_agency_roles(&paths, runtime).is_empty());
+        assert!(install_agency_roles(&paths, runtime).is_empty());
+        let agents = paths.claude_skills.parent().unwrap().join("agents");
+        for role in crate::agency::STARTER_ROLES
+            .iter()
+            .filter_map(|id| crate::agency::role(id))
+        {
+            assert_eq!(
+                std::fs::read_to_string(agents.join(format!("{}.md", role.agent_name()))).unwrap(),
+                role.definition()
+            );
+        }
+        let customized = agents.join("paneflow-agency-ui-designer.md");
+        std::fs::write(&customized, "my customized Agency designer").unwrap();
+        assert_eq!(install_agency_roles(&paths, runtime).len(), 1);
+        assert_eq!(remove_agency_roles(&paths, runtime).unwrap().len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&customized).unwrap(),
+            "my customized Agency designer"
+        );
+        assert!(agents.join("PANEFLOW_AGENCY_LICENSE.txt").is_file());
+        assert!(!agents.join("paneflow-agency-orchestrator.md").exists());
+        let codex = runtime_by_slug("codex").unwrap();
+        assert!(agency_documents(&paths, codex).is_empty());
     }
 
     fn install_claude(paths: &ConfigPaths, binaries: &IntegrationBinaries) -> IntegrationStatus {

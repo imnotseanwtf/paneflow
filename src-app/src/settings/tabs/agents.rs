@@ -1,15 +1,17 @@
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use gpui::{
     AnyElement, ClickEvent, Context, CursorStyle, Entity, Hsla, InteractiveElement, IntoElement,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled, div, prelude::*, px, rgb, svg,
+    ParentElement, PathPromptOptions, SharedString, StatefulInteractiveElement, Styled, div,
+    prelude::*, px, rgb, svg,
 };
 use paneflow_config::schema::AgentProfileConfig;
 use paneflow_mcp_install::IntegrationState;
 
 use crate::PaneFlowApp;
 use crate::SidebarWidthAnimation;
-use crate::agent_launcher::{AgentProfile, TerminalAgent};
+use crate::agent_launcher::{AgentProfile, ORCHESTRATOR_MODEL, TerminalAgent};
 use crate::agent_updates::{self, AgentUpdateState, UpdateMethod, UpdatePhase};
 use crate::settings::components::{
     deferred_select_menu, destructive_color, ghost_icon_button, ghost_skin, hairline,
@@ -64,18 +66,180 @@ pub(crate) struct AgentProfileEditor {
     pub(crate) agent_menu_open: bool,
     pub(crate) error: Option<String>,
     pub(crate) env_rows: Vec<EnvRowInputs>,
+    pub(crate) model_input: Entity<TextInput>,
+    pub(crate) models: Vec<crate::agent_profile_context::ModelChoice>,
+    pub(crate) model_menu_open: bool,
+    pub(crate) model_catalog_generation: u64,
+    pub(crate) custom_model: bool,
+    pub(crate) effort: Option<String>,
+    pub(crate) effort_menu_open: bool,
+    pub(crate) project: Option<PathBuf>,
+    pub(crate) default_profile: Option<String>,
+    pub(crate) skills: Vec<PathBuf>,
+    pub(crate) skill_input: Entity<TextInput>,
+    pub(crate) available_skills: Vec<crate::agent_profile_context::SkillChoice>,
+    pub(crate) skills_loading: bool,
+    pub(crate) skills_generation: u64,
+    pub(crate) suggested_name: String,
+    pub(crate) role_search: Entity<TextInput>,
+    pub(crate) role_menu_open: bool,
+    pub(crate) agency_role: Option<String>,
+}
+
+fn matching_agency_roles(query: &str) -> Vec<&'static paneflow_mcp_install::agency::AgencyRole> {
+    let query = query.trim().to_lowercase();
+    paneflow_mcp_install::agency::ROLES
+        .iter()
+        .filter(|role| {
+            query.is_empty()
+                || format!(
+                    "{} {} {} {}",
+                    role.id, role.name, role.category, role.description
+                )
+                .to_lowercase()
+                .contains(&query)
+        })
+        .collect()
+}
+
+fn profile_project_label(project: &Path) -> String {
+    project
+        .file_name()
+        .unwrap_or(project.as_os_str())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn suggested_profile_name(
+    project: Option<&Path>,
+    role: Option<&str>,
+    agent: TerminalAgent,
+    profiles: &[AgentProfileConfig],
+    editing: Option<usize>,
+) -> String {
+    let role_name = role
+        .and_then(paneflow_mcp_install::agency::role)
+        .map(|role| role.name);
+    let base = match (project, role_name) {
+        (Some(project), role) => format!(
+            "{} {}",
+            profile_project_label(project),
+            role.unwrap_or(agent.display_name())
+        ),
+        (None, Some(role)) => format!("Agency {role}"),
+        (None, None) => agent.display_name().to_string(),
+    };
+    let mut name = base.clone();
+    let mut suffix = 2;
+    while profiles.iter().enumerate().any(|(index, entry)| {
+        Some(index) != editing
+            && entry.applies_to_project(project)
+            && entry.name.eq_ignore_ascii_case(&name)
+    }) {
+        name = format!("{base} {suffix}");
+        suffix += 1;
+    }
+    name
 }
 
 impl PaneFlowApp {
+    pub(crate) fn open_project_agent_settings(
+        &mut self,
+        index: usize,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspaces.get(index) else {
+            return;
+        };
+        let project = workspace
+            .repo_root
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(&workspace.cwd));
+        if !project.is_absolute() {
+            return;
+        }
+        self.open_settings_at(crate::SettingsSection::Agents, window, cx);
+        self.agent_profiles_project = Some(project);
+        cx.notify();
+    }
+
+    fn active_profile_project(&self) -> Option<PathBuf> {
+        let workspace = self.active_workspace()?;
+        let project = workspace
+            .repo_root
+            .as_deref()
+            .unwrap_or_else(|| Path::new(&workspace.cwd));
+        project.is_absolute().then(|| project.to_path_buf())
+    }
+
+    fn update_agent_profile_suggested_name(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.agent_profile_editor.as_mut() else {
+            return;
+        };
+        if editor.agency_role.as_deref() == Some("orchestrator")
+            && editor.model_input.read(cx).value() == ORCHESTRATOR_MODEL
+        {
+            editor
+                .model_input
+                .update(cx, |input, cx| input.set_value(SharedString::from(""), cx));
+            editor.custom_model = false;
+        }
+        let next = suggested_profile_name(
+            editor.project.as_deref(),
+            editor.agency_role.as_deref(),
+            editor.agent,
+            &self.cached_config.agent_profiles,
+            editor.index,
+        );
+        let current = self.agent_profile_name_input.read(cx).value();
+        if current.trim().is_empty() || current == editor.suggested_name {
+            self.agent_profile_name_input.update(cx, |input, cx| {
+                input.set_value(SharedString::from(next.clone()), cx)
+            });
+        }
+        editor.suggested_name = next;
+    }
+
     pub(crate) fn render_agents_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = crate::theme::ui_colors();
+        let project_view = self.agent_profiles_project.is_some();
         div()
             .flex()
             .flex_col()
-            .child(self.render_installed_agents_section(ui, cx))
-            .child(self.render_missing_agents_section(ui, cx))
+            .child(div().pb(px(12.)).child(if project_view {
+                soft_button(
+                    "agent-profiles-defaults",
+                    "Edit default profiles",
+                    ui,
+                    cx.listener(|this, _, window, cx| {
+                        this.open_settings_at(crate::SettingsSection::Agents, window, cx)
+                    }),
+                )
+                .into_any_element()
+            } else if self.active_profile_project().is_some() {
+                let index = self.active_idx;
+                soft_button(
+                    "agent-profiles-project-settings",
+                    "Project agent settings",
+                    ui,
+                    cx.listener(move |this, _, window, cx| {
+                        this.open_project_agent_settings(index, window, cx)
+                    }),
+                )
+                .into_any_element()
+            } else {
+                div().into_any_element()
+            }))
+            .when(!project_view, |column| {
+                column
+                    .child(self.render_installed_agents_section(ui, cx))
+                    .child(self.render_missing_agents_section(ui, cx))
+            })
             .child(self.render_agent_profiles_section(ui, cx))
-            .child(self.render_agent_permissions_section(ui, cx))
+            .when(!project_view, |column| {
+                column.child(self.render_agent_permissions_section(ui, cx))
+            })
             .child(div().h(px(180.)).flex_none())
     }
 
@@ -948,13 +1112,22 @@ impl PaneFlowApp {
         ui: crate::theme::UiColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let entries = &self.cached_config.agent_profiles;
+        let entries: Vec<_> = self
+            .cached_config
+            .agent_profiles
+            .iter()
+            .enumerate()
+            .filter(|(_, profile)| {
+                self.cached_config
+                    .agent_profile_applies(profile, self.agent_profiles_project.as_deref())
+            })
+            .collect();
         let editor = self.agent_profile_editor.as_ref();
         let creating = editor.is_some_and(|editor| editor.index.is_none());
 
         let mut card = setting_card(ui).py(px(CARD_PADDING_Y));
-        for (idx, entry) in entries.iter().enumerate() {
-            if idx > 0 {
+        for (position, &(idx, entry)) in entries.iter().enumerate() {
+            if position > 0 {
                 card = card.child(hairline_inset(ui));
             }
             let editing = editor.is_some_and(|editor| editor.index == Some(idx));
@@ -1022,17 +1195,211 @@ impl PaneFlowApp {
                     }))
                     .child("+ New profile"),
             );
+            if self.agent_profiles_project.is_none() {
+                card = card.child(
+                    div()
+                        .id("agent-profile-agency")
+                        .accessible_control(gpui::accesskit::Role::Button, "Add Agency Agents team")
+                        .h(px(36.))
+                        .px(px(CARD_PADDING_X))
+                        .flex()
+                        .items_center()
+                        .cursor(CursorStyle::PointingHand)
+                        .text_size(BODY)
+                        .text_color(ui.muted)
+                        .hover(move |style| style.text_color(ui.text).bg(with_alpha(ui.text, 0.05)))
+                        .on_press(cx.listener(|this, _, _window, cx| this.add_agency_profiles(cx)))
+                        .child("+ Add Agency Agents team"),
+                );
+            }
         }
 
-        Block::new("Profiles")
+        let mut block = Block::new("Profiles")
             .top_gap(24.)
             .child(section_title(
                 ui,
-                "Profiles",
-                Some("Launch an agent with its own environment and arguments."),
+                if self.agent_profiles_project.is_some() { "Project agents" } else { "Default profiles" },
+                Some(if self.agent_profiles_project.is_some() { "Customize a default for this project, or add another agent. Defaults stay unchanged." } else { "Default agents and skills, available to every project until customized." }),
             ))
-            .child(card)
-            .finish()
+            .child(card);
+        if self.agent_profiles_project.is_none() {
+            block = block.child(
+                div().mt(px(12.)).flex().gap(px(8.))
+                    .child(soft_button("agent-setup-export", "Export setup…", ui,
+                        cx.listener(|this, _, _, cx| this.export_agent_setup(cx))))
+                    .child(soft_button("agent-setup-import", "Import setup…", ui,
+                        cx.listener(|this, _, _, cx| this.choose_agent_setup(cx))))
+            ).child(detail_text("JSON includes default and project profiles, environment values, arguments and skill paths. Skill files and agent sign-ins stay on this machine.".to_string(), ui.muted));
+            if let Some(review) = &self.agent_setup_review {
+                let mut rows = div()
+                    .id("agent-setup-review-list")
+                    .max_h(px(240.))
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.));
+                for profile in &review.incoming {
+                    rows = rows.child(div().flex().flex_col()
+                        .child(div().text_size(BODY).text_color(ui.text).child(profile.name.clone()))
+                        .child(detail_text(format!("{} · {} · {} effort · {} · {} skills · {} environment values · {} arguments",
+                            profile.agent, profile.model.as_deref().unwrap_or("Agent default"),
+                            profile.effort.as_deref().unwrap_or("default"),
+                            profile.project.as_deref().map(|p| p.display().to_string()).unwrap_or_else(|| "All projects".into()),
+                            profile.skills.len(), profile.env.len(), profile.args.len()), ui.muted))
+                        .child(detail_text(serde_json::to_string(profile).unwrap_or_else(|error| format!("Cannot display profile: {error}")), ui.muted)));
+                }
+                block = block.child(setting_card(ui).p(px(16.)).flex().flex_col().gap(px(12.))
+                    .child(div().text_size(BODY_EMPHASIS).text_color(ui.text).child(format!("Import review: {} added, {} updated", review.added, review.updated)))
+                    .child(detail_text(review.source.display().to_string(), ui.muted))
+                    .child(detail_text(format!("Matches use profile name and project. Other profiles stay unchanged. {} unavailable skill files will need their paths updated. A backup is saved before applying.", review.missing_skills), ui.muted))
+                    .child(rows)
+                    .child(div().flex().gap(px(8.))
+                        .child(soft_button("agent-setup-apply", "Apply import", ui, cx.listener(|this, _, _, cx| this.apply_agent_setup(cx))))
+                        .child(soft_button("agent-setup-cancel", "Cancel", ui, cx.listener(|this, _, _, cx| {
+                            if !this.agent_profiles_busy { this.agent_setup_review = None; cx.notify(); }
+                        }))))) ;
+            }
+        }
+        block.finish()
+    }
+
+    fn agent_setup_available(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.agent_profiles_busy || self.pending_settings.contains_key("agent_profiles") {
+            self.show_toast("Wait for agent profiles to finish saving", cx);
+            return false;
+        }
+        if self.agent_profile_editor.is_some() {
+            self.show_toast("Save or cancel the profile draft first", cx);
+            return false;
+        }
+        true
+    }
+
+    fn export_agent_setup(&mut self, cx: &mut Context<Self>) {
+        if !self.agent_setup_available(cx) {
+            return;
+        }
+        let Some(directory) = dirs::download_dir().or_else(dirs::home_dir) else {
+            self.show_toast("Cannot determine an export directory", cx);
+            return;
+        };
+        let receiver = cx.prompt_for_new_path(&directory, Some("paneflow-agent-setup.json"));
+        self.agent_profiles_busy = true;
+        cx.spawn(async move |this, cx| {
+            let result = match receiver.await {
+                Ok(Ok(Some(path))) => {
+                    smol::unblock(move || {
+                        let current = crate::config_writer::agent_profiles_snapshot()?;
+                        let (profiles, _, _) = crate::agent_setup::merge(&current, &[])?;
+                        crate::agent_setup::export(&path, &profiles)?;
+                        Ok(Some(path))
+                    })
+                    .await
+                }
+                Ok(Ok(None)) => Ok(None),
+                Ok(Err(error)) => Err(error.to_string()),
+                Err(error) => Err(error.to_string()),
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.agent_profiles_busy = false;
+                match result {
+                    Ok(Some(path)) => {
+                        this.show_toast(format!("Agent setup exported to {}", path.display()), cx)
+                    }
+                    Ok(None) => cx.notify(),
+                    Err(error) => this.show_toast(format!("Could not export setup: {error}"), cx),
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn choose_agent_setup(&mut self, cx: &mut Context<Self>) {
+        if !self.agent_setup_available(cx) {
+            return;
+        }
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Import agent setup JSON".into()),
+        });
+        self.agent_profiles_busy = true;
+        self.agent_setup_review = None;
+        cx.spawn(async move |this, cx| {
+            let result = match receiver.await {
+                Ok(Ok(Some(mut paths))) if paths.len() == 1 => {
+                    let path = paths.remove(0);
+                    smol::unblock(move || {
+                        crate::agent_setup::read_review(
+                            path,
+                            crate::config_writer::agent_profiles_snapshot()?,
+                        )
+                        .map(Some)
+                    })
+                    .await
+                }
+                Ok(Ok(_)) => Ok(None),
+                Ok(Err(error)) => Err(error.to_string()),
+                Err(error) => Err(error.to_string()),
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.agent_profiles_busy = false;
+                match result {
+                    Ok(review) => {
+                        if this.settings_section == Some(crate::SettingsSection::Agents)
+                            && this.agent_profiles_project.is_none()
+                        {
+                            this.agent_setup_review = review;
+                        }
+                        cx.notify();
+                    }
+                    Err(error) => this.show_toast(format!("Could not import setup: {error}"), cx),
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn apply_agent_setup(&mut self, cx: &mut Context<Self>) {
+        if !self.agent_setup_available(cx) {
+            return;
+        }
+        let Some(review) = self.agent_setup_review.take() else {
+            return;
+        };
+        self.agent_profiles_busy = true;
+        cx.spawn(async move |this, cx| {
+            let (review, result) = smol::unblock(move || {
+                let result = crate::config_writer::import_agent_setup(&review);
+                (review, result)
+            })
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                this.agent_profiles_busy = false;
+                match result {
+                    Ok((profiles, backup)) => {
+                        this.cached_config.agent_profiles = profiles;
+                        crate::config_snapshot::publish(&this.cached_config, cx);
+                        this.refresh_usage_inventory(false, cx);
+                        this.show_toast(
+                            format!("Agent setup imported. Backup: {}", backup.display()),
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        if this.settings_section == Some(crate::SettingsSection::Agents)
+                            && this.agent_profiles_project.is_none()
+                        {
+                            this.agent_setup_review = Some(review);
+                        }
+                        this.show_toast(format!("Could not apply setup: {error}"), cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn render_agent_profile_row(
@@ -1054,17 +1421,49 @@ impl PaneFlowApp {
             .text_size(LABEL_SM)
             .text_color(ui.muted)
             .whitespace_nowrap();
-        let icon = match AgentProfile::from_config(entry) {
+        let icon = match AgentProfile::for_project(
+            entry,
+            &self.cached_config,
+            self.agent_profiles_project.as_deref(),
+        ) {
             Ok(profile) => {
                 meta = meta.child(profile.agent.display_name());
-                if !profile.env.is_empty() || !profile.args.is_empty() {
+                if let Some(role) = entry
+                    .agency_role
+                    .as_deref()
+                    .and_then(paneflow_mcp_install::agency::role)
+                {
+                    meta = meta.child(chip(role.name.to_string(), ui));
+                }
+                if let Some(model) = &entry.model {
+                    meta = meta.child(chip(
+                        if model == ORCHESTRATOR_MODEL {
+                            "Orchestrator model".to_string()
+                        } else {
+                            model.clone()
+                        },
+                        ui,
+                    ));
+                }
+                if let Some(effort) = &entry.effort {
+                    meta = meta.child(chip(format!("{effort} effort"), ui));
+                }
+                meta = meta.child(chip(
+                    entry
+                        .project
+                        .as_deref()
+                        .map(profile_project_label)
+                        .unwrap_or_else(|| "Default".to_string()),
+                    ui,
+                ));
+                if !profile.env.is_empty() || !entry.args.is_empty() {
                     meta = meta.child("·");
                 }
                 for (key, value) in &profile.env {
                     meta = meta.child(chip(format!("{key}={value}"), ui));
                 }
-                if !profile.args.is_empty() {
-                    meta = meta.child(chip(profile.args.join(" "), ui));
+                if !entry.args.is_empty() {
+                    meta = meta.child(chip(entry.args.join(" "), ui));
                 }
                 agent_icon_el(profile.agent, ui)
             }
@@ -1093,20 +1492,25 @@ impl PaneFlowApp {
                     ui,
                 )
                 .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                    this.open_agent_profile_editor(Some(idx), cx);
+                    this.open_agent_profile_editor(Some(idx), cx)
                 })),
             )
-            .child(
-                icon_button(
-                    SharedString::from(format!("agent-profile-delete-{idx}")),
-                    "icons/settings/delete-02.svg",
-                    with_alpha(ui.text, 0.8),
-                    destructive_color(),
-                    ui,
-                )
-                .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
-                    this.delete_agent_profile(idx, cx);
-                })),
+            .when(
+                !(self.agent_profiles_project.is_some() && entry.project.is_none()),
+                |actions| {
+                    actions.child(
+                        icon_button(
+                            SharedString::from(format!("agent-profile-delete-{idx}")),
+                            "icons/settings/delete-02.svg",
+                            with_alpha(ui.text, 0.8),
+                            destructive_color(),
+                            ui,
+                        )
+                        .on_click(cx.listener(
+                            move |this, _: &ClickEvent, _w, cx| this.delete_agent_profile(idx, cx),
+                        )),
+                    )
+                },
             );
 
         div()
@@ -1146,6 +1550,146 @@ impl PaneFlowApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let base_select = self.render_agent_profile_base_select(editor, ui, cx);
+        let role_select = self.render_agency_role_select(editor, ui, cx);
+        let effort_select = self.render_agent_profile_effort_select(editor, ui, cx);
+        let model_select = self.render_agent_profile_model_select(editor, ui, cx);
+        let mut skills = div().flex().flex_col().gap(px(6.));
+        for (index, path) in editor.skills.iter().enumerate() {
+            let name = crate::agent_profile_context::skill_label(path);
+            skills = skills.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(BODY)
+                            .text_color(ui.text)
+                            .truncate()
+                            .id(SharedString::from(format!("agent-skill-path-{index}")))
+                            .delayed_tooltip(text_tooltip(path.display().to_string()))
+                            .child(name),
+                    )
+                    .child(
+                        ghost_icon_button(
+                            SharedString::from(format!("agent-skill-remove-{index}")),
+                            "Remove skill",
+                            "icons/settings/delete-02.svg",
+                            ui,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(editor) = this.agent_profile_editor.as_mut()
+                                && index < editor.skills.len()
+                            {
+                                editor.skills.remove(index);
+                            }
+                            cx.notify();
+                        })),
+                    ),
+            );
+        }
+        skills = skills.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                            if event.keystroke.key == "enter" {
+                                this.attach_agent_profile_skill_query(cx);
+                                cx.stop_propagation();
+                            }
+                        }))
+                        .child(input_box(editor.skill_input.clone(), false, ui)),
+                )
+                .child(soft_button(
+                    "agent-skill-attach",
+                    "Add",
+                    ui,
+                    cx.listener(|this, _, _, cx| this.attach_agent_profile_skill_query(cx)),
+                )),
+        );
+        skills = skills.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(
+                    ghost_icon_button(
+                        "agent-skill-browse",
+                        "Browse…",
+                        "icons/settings/folder-open.svg",
+                        ui,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.choose_agent_profile_skills(cx))),
+                )
+                .child(
+                    ghost_icon_button(
+                        "agent-skill-refresh",
+                        "Refresh local skills",
+                        "icons/refresh.svg",
+                        ui,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.refresh_agent_profile_skills(cx))),
+                ),
+        );
+        let skill_query = editor.skill_input.read(cx).value();
+        if !skill_query.trim().is_empty()
+            && !crate::agent_profile_context::is_skill_path_query(&skill_query)
+        {
+            let matches = crate::agent_profile_context::matching_skills(
+                &editor.available_skills,
+                &skill_query,
+            );
+            for (index, choice) in matches.iter().take(8).enumerate() {
+                let path = choice.path.clone();
+                skills = skills.child(
+                    select_option(
+                        SharedString::from(format!("agent-local-skill-{index}")),
+                        editor.skills.contains(&path),
+                        ui,
+                    )
+                    .h(px(AGENT_ROW_HEIGHT))
+                    .text_color(ui.text)
+                    .accessible_control(
+                        gpui::accesskit::Role::MenuItem,
+                        SharedString::from(format!("{} {}", choice.name, path.display())),
+                    )
+                    .on_press(cx.listener(move |this, _, _, cx| {
+                        this.attach_agent_profile_skill_paths(vec![path.clone()], cx)
+                    }))
+                    .child(
+                        div()
+                            .flex_col()
+                            .min_w_0()
+                            .child(div().truncate().child(choice.name.clone()))
+                            .child(
+                                div()
+                                    .text_size(LABEL_SM)
+                                    .text_color(ui.muted)
+                                    .truncate()
+                                    .child(choice.path.display().to_string()),
+                            ),
+                    ),
+                );
+            }
+            if editor.skills_loading || matches.is_empty() || matches.len() > 8 {
+                skills = skills.child(div().text_size(LABEL_SM).text_color(ui.muted).child(
+                    if editor.skills_loading {
+                        "Finding local skills…"
+                    } else if matches.is_empty() {
+                        "No matching local skill. Paste a Markdown path or use Browse."
+                    } else {
+                        "Showing the first 8 matches. Refine your search to see more."
+                    },
+                ));
+            }
+        }
 
         let home = dirs::home_dir();
         let row_values: Vec<String> = editor
@@ -1279,6 +1823,25 @@ impl PaneFlowApp {
                 ui,
             ))
             .child(hairline(ui))
+            .when(matches!(editor.agent, TerminalAgent::ClaudeCode | TerminalAgent::Codex), |column| {
+                column
+                    .child(editor_row("Agency role", "Choose an expertise from Agency Agents, or leave it unset.", div().w(px(CONTROL_WIDTH)).child(role_select), ui))
+                    .child(hairline(ui))
+            })
+            .when(matches!(editor.agent, TerminalAgent::ClaudeCode | TerminalAgent::Codex), |column| {
+                column
+                    .child(editor_stacked_row("Skills", "Find a local skill by name or paste a Markdown file path. Its guidance is added to new sessions; resources stay in place.", skills, ui))
+                    .child(hairline(ui))
+                    .child(editor_row(
+                        "Model",
+                        "Choose a model, use the account default, or enter another model ID.",
+                        div().w(px(CONTROL_WIDTH)).child(model_select),
+                        ui,
+                    ))
+                    .child(hairline(ui))
+                    .child(editor_row("Effort", "Choose a supported level, or use the agent default. Model support varies.", div().w(px(CONTROL_WIDTH)).child(effort_select), ui))
+                    .child(hairline(ui))
+            })
             .child(editor_stacked_row(
                 "Environment variables",
                 "Set on the agent process. A leading ~ is your home, and $NAME, ${NAME} or \
@@ -1328,6 +1891,599 @@ impl PaneFlowApp {
             .into_any_element()
     }
 
+    fn apply_agent_profile_skill_paths(
+        &mut self,
+        identity: gpui::EntityId,
+        result: std::io::Result<Vec<PathBuf>>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self
+            .agent_profile_editor
+            .as_mut()
+            .filter(|editor| editor.model_input.entity_id() == identity)
+        else {
+            return;
+        };
+        match result {
+            Ok(paths) => {
+                let mut selected = editor.skills.clone();
+                for path in paths {
+                    if !selected.contains(&path) {
+                        selected.push(path);
+                    }
+                }
+                match crate::agent_profile_context::validate_skill_selection(&selected) {
+                    Ok(()) => {
+                        editor.skills = selected;
+                        editor.error = None;
+                        editor
+                            .skill_input
+                            .update(cx, |input, cx| input.set_value(SharedString::from(""), cx));
+                    }
+                    Err(error) => editor.error = Some(error),
+                }
+            }
+            Err(error) => editor.error = Some(format!("Could not attach skill: {error}")),
+        }
+        cx.notify();
+    }
+
+    fn attach_agent_profile_skill_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let Some(editor) = self.agent_profile_editor.as_ref() else {
+            return;
+        };
+        let identity = editor.model_input.entity_id();
+        let base = editor
+            .project
+            .clone()
+            .or_else(|| self.active_profile_project());
+        cx.spawn(async move |this, cx| {
+            let result = smol::unblock(move || {
+                crate::agent_profile_context::prepare_skill_paths(paths, base.as_deref())
+            })
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                this.apply_agent_profile_skill_paths(identity, result, cx)
+            });
+        })
+        .detach();
+    }
+
+    fn attach_agent_profile_skill_query(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.agent_profile_editor.as_ref() else {
+            return;
+        };
+        let query = editor.skill_input.read(cx).value();
+        if crate::agent_profile_context::is_skill_path_query(&query) {
+            match crate::agent_profile_context::pasted_skill_path(&query) {
+                Ok(path) => self.attach_agent_profile_skill_paths(vec![path], cx),
+                Err(error) => {
+                    if let Some(editor) = self.agent_profile_editor.as_mut() {
+                        editor.error = Some(error.to_string());
+                    }
+                    cx.notify();
+                }
+            }
+            return;
+        }
+        let matches =
+            crate::agent_profile_context::matching_skills(&editor.available_skills, &query);
+        if !query.trim().is_empty() && !editor.skills_loading && matches.len() == 1 {
+            let path = matches[0].path.clone();
+            self.attach_agent_profile_skill_paths(vec![path], cx);
+        } else {
+            let message = if editor.skills_loading {
+                "Local skills are still loading; choose a result when ready"
+            } else if matches.is_empty() {
+                "No matching local skill. Paste a Markdown file path or use Browse"
+            } else {
+                "Choose a matching skill from the list, or refine your search"
+            };
+            if let Some(editor) = self.agent_profile_editor.as_mut() {
+                editor.error = Some(message.to_string());
+            }
+            cx.notify();
+        }
+    }
+
+    fn refresh_agent_profile_skills(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.agent_profile_editor.as_mut() else {
+            return;
+        };
+        editor.skills_generation = editor.skills_generation.wrapping_add(1);
+        let generation = editor.skills_generation;
+        editor.skills_loading = true;
+        let identity = editor.model_input.entity_id();
+        let project = editor.project.clone();
+        let env = collect_env(
+            &editor
+                .env_rows
+                .iter()
+                .map(|row| (row.key.read(cx).value(), row.value.read(cx).value()))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_default();
+        cx.spawn(async move |this, cx| {
+            let choices =
+                smol::unblock(move || crate::agent_profile_context::installed_skills(project, env))
+                    .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(editor) = this.agent_profile_editor.as_mut()
+                    && editor.model_input.entity_id() == identity
+                    && editor.skills_generation == generation
+                {
+                    editor.available_skills = choices;
+                    editor.skills_loading = false;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn choose_agent_profile_skills(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.agent_profile_editor.as_ref() else {
+            return;
+        };
+        let identity = editor.model_input.entity_id();
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: true,
+            multiple: true,
+            prompt: Some("Attach Markdown skill".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = receiver.await else {
+                return;
+            };
+            let result = smol::unblock(move || {
+                crate::agent_profile_context::prepare_skill_paths(paths, None)
+            })
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                this.apply_agent_profile_skill_paths(identity, result, cx)
+            });
+        })
+        .detach();
+    }
+
+    fn refresh_agent_profile_models(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.agent_profile_editor.as_mut() else {
+            return;
+        };
+        editor.model_catalog_generation = editor.model_catalog_generation.wrapping_add(1);
+        let generation = editor.model_catalog_generation;
+        let identity = editor.model_input.entity_id();
+        let agent = editor.agent;
+        let env = collect_env(
+            &editor
+                .env_rows
+                .iter()
+                .map(|row| (row.key.read(cx).value(), row.value.read(cx).value()))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_default();
+        cx.spawn(async move |this, cx| {
+            let choices =
+                smol::unblock(move || crate::agent_profile_context::model_choices(agent, env))
+                    .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(editor) = this.agent_profile_editor.as_mut()
+                    && editor.model_input.entity_id() == identity
+                    && editor.agent == agent
+                    && editor.model_catalog_generation == generation
+                {
+                    let current = editor.model_input.read(cx).value();
+                    if choices.iter().any(|choice| choice.id == current) {
+                        editor.custom_model = false;
+                    }
+                    editor.models = choices;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn render_agent_profile_model_select(
+        &self,
+        editor: &AgentProfileEditor,
+        ui: crate::theme::UiColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let open = editor.model_menu_open;
+        let current = editor.model_input.read(cx).value();
+        let label = if current == ORCHESTRATOR_MODEL {
+            "Default (Orchestrator’s model)".to_string()
+        } else if editor.custom_model {
+            "Other model…".to_string()
+        } else {
+            editor
+                .models
+                .iter()
+                .find(|choice| choice.id == current)
+                .map(|choice| choice.label.clone())
+                .unwrap_or_else(|| {
+                    if current.is_empty() {
+                        "Account default".to_string()
+                    } else {
+                        current.clone()
+                    }
+                })
+        };
+        let mut trigger = select_trigger("agent-profile-model", "Model", open, ui)
+            .w_full()
+            .max_w(px(CONTROL_WIDTH))
+            .h(px(INPUT_HEIGHT))
+            .py(px(0.))
+            .on_press(cx.listener(move |this, _, _, cx| {
+                if let Some(editor) = this.agent_profile_editor.as_mut() {
+                    editor.model_menu_open = !open;
+                    editor.role_menu_open = false;
+                    editor.effort_menu_open = false;
+                    editor.agent_menu_open = false;
+                }
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(BODY)
+                    .text_color(ui.text)
+                    .child(label),
+            )
+            .child(select_chevron(ui));
+        if open {
+            let mut menu = select_menu("agent-profile-model-menu", ui).on_mouse_down_out(
+                cx.listener(|this, _, _, cx| {
+                    if let Some(editor) = this.agent_profile_editor.as_mut() {
+                        editor.model_menu_open = false;
+                    }
+                    cx.notify();
+                }),
+            );
+            let options = (editor.project.is_some()
+                && editor.agency_role.as_deref() != Some("orchestrator"))
+            .then(|| {
+                (
+                    ORCHESTRATOR_MODEL.to_string(),
+                    "Default (Orchestrator’s model)".to_string(),
+                    false,
+                )
+            })
+            .into_iter()
+            .chain(std::iter::once((
+                String::new(),
+                "Account default".to_string(),
+                false,
+            )))
+            .chain(
+                editor
+                    .models
+                    .iter()
+                    .map(|choice| (choice.id.clone(), choice.label.clone(), false)),
+            )
+            .chain(std::iter::once((
+                String::new(),
+                "Other model…".to_string(),
+                true,
+            )));
+            for (index, (id, label, custom)) in options.enumerate() {
+                menu = menu.child(
+                    select_option(
+                        SharedString::from(format!("agent-profile-model-option-{index}")),
+                        if custom {
+                            editor.custom_model
+                        } else {
+                            !editor.custom_model && current == id
+                        },
+                        ui,
+                    )
+                    .text_color(ui.text)
+                    .accessible_control(
+                        gpui::accesskit::Role::MenuItem,
+                        SharedString::from(label.clone()),
+                    )
+                    .on_press(cx.listener(move |this, _, window, cx| {
+                        if let Some(editor) = this.agent_profile_editor.as_mut() {
+                            let effective_id = if id == ORCHESTRATOR_MODEL {
+                                match editor
+                                    .project
+                                    .as_deref()
+                                    .ok_or_else(|| {
+                                        "Choose this option in project settings".to_string()
+                                    })
+                                    .and_then(|project| {
+                                        AgentProfile::orchestrator_model(
+                                            &this.cached_config,
+                                            project,
+                                            editor.agent,
+                                        )
+                                    }) {
+                                    Ok(model) => model,
+                                    Err(error) => {
+                                        editor.error = Some(error);
+                                        editor.model_menu_open = false;
+                                        cx.notify();
+                                        return;
+                                    }
+                                }
+                            } else {
+                                id.clone()
+                            };
+                            editor.custom_model = custom;
+                            editor.model_menu_open = false;
+                            editor.model_input.update(cx, |input, cx| {
+                                input.set_value(SharedString::from(id.clone()), cx)
+                            });
+                            if let Some(choice) = editor
+                                .models
+                                .iter()
+                                .find(|choice| choice.id == effective_id)
+                                && !choice.efforts.is_empty()
+                                && editor
+                                    .effort
+                                    .as_ref()
+                                    .is_some_and(|effort| !choice.efforts.contains(effort))
+                            {
+                                editor.effort = None;
+                            }
+                            if custom {
+                                let focus = editor.model_input.read(cx).focus_handle.clone();
+                                focus.focus(window, cx);
+                            }
+                            editor.error = None;
+                        }
+                        cx.notify();
+                    }))
+                    .child(label),
+                );
+            }
+            trigger = trigger.child(deferred_select_menu(menu));
+        }
+        div()
+            .relative()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(trigger)
+            .when(editor.custom_model, |column| {
+                column.child(input_box(editor.model_input.clone(), false, ui))
+            })
+            .into_any_element()
+    }
+
+    fn render_agent_profile_effort_select(
+        &self,
+        editor: &AgentProfileEditor,
+        ui: crate::theme::UiColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let open = editor.effort_menu_open;
+        let mut model_id = editor.model_input.read(cx).value();
+        if model_id == ORCHESTRATOR_MODEL {
+            model_id = editor
+                .project
+                .as_deref()
+                .and_then(|project| {
+                    AgentProfile::orchestrator_model(&self.cached_config, project, editor.agent)
+                        .ok()
+                })
+                .unwrap_or_default();
+        }
+        let efforts: Vec<String> = editor
+            .models
+            .iter()
+            .find(|model| model.id == model_id)
+            .filter(|model| !model.efforts.is_empty())
+            .map(|model| model.efforts.clone())
+            .unwrap_or_else(|| {
+                editor
+                    .agent
+                    .effort_levels()
+                    .iter()
+                    .map(|level| (*level).to_string())
+                    .collect()
+            });
+        let mut trigger = select_trigger("agent-profile-effort", "Reasoning effort", open, ui)
+            .w_full()
+            .max_w(px(CONTROL_WIDTH))
+            .h(px(INPUT_HEIGHT))
+            .py(px(0.))
+            .on_press(cx.listener(move |this, _, _, cx| {
+                if let Some(editor) = this.agent_profile_editor.as_mut() {
+                    editor.effort_menu_open = !open;
+                    editor.model_menu_open = false;
+                    editor.agent_menu_open = false;
+                    editor.role_menu_open = false;
+                }
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(BODY)
+                    .text_color(ui.text)
+                    .child(
+                        editor
+                            .effort
+                            .clone()
+                            .unwrap_or_else(|| "Agent default".to_string()),
+                    ),
+            )
+            .child(select_chevron(ui));
+        if open {
+            let mut menu = select_menu("agent-profile-effort-menu", ui).on_mouse_down_out(
+                cx.listener(|this, _, _, cx| {
+                    if let Some(editor) = this.agent_profile_editor.as_mut() {
+                        editor.effort_menu_open = false;
+                    }
+                    cx.notify();
+                }),
+            );
+            for value in std::iter::once(None).chain(efforts.into_iter().map(Some)) {
+                let label = value.clone().unwrap_or_else(|| "Agent default".to_string());
+                menu = menu.child(
+                    select_option(
+                        SharedString::from(format!("agent-profile-effort-{label}")),
+                        editor.effort == value,
+                        ui,
+                    )
+                    .text_color(ui.text)
+                    .accessible_control(
+                        gpui::accesskit::Role::MenuItem,
+                        SharedString::from(label.clone()),
+                    )
+                    .on_press(cx.listener(move |this, _, _, cx| {
+                        if let Some(editor) = this.agent_profile_editor.as_mut() {
+                            editor.effort = value.clone();
+                            editor.effort_menu_open = false;
+                            editor.error = None;
+                        }
+                        cx.notify();
+                    }))
+                    .child(label),
+                );
+            }
+            trigger = trigger.child(deferred_select_menu(menu));
+        }
+        div().relative().w_full().child(trigger).into_any_element()
+    }
+
+    fn render_agency_role_select(
+        &self,
+        editor: &AgentProfileEditor,
+        ui: crate::theme::UiColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let selected = editor
+            .agency_role
+            .as_deref()
+            .and_then(paneflow_mcp_install::agency::role);
+        let open = editor.role_menu_open;
+        let mut trigger = select_trigger("agent-profile-role", "Agency role", open, ui)
+            .w_full()
+            .max_w(px(CONTROL_WIDTH))
+            .h(px(INPUT_HEIGHT))
+            .py(px(0.))
+            .on_press(cx.listener(move |this, _, window, cx| {
+                if let Some(editor) = this.agent_profile_editor.as_mut() {
+                    editor.role_menu_open = !open;
+                    editor.model_menu_open = false;
+                    editor.effort_menu_open = false;
+                    editor.agent_menu_open = false;
+                    if !open {
+                        let focus = editor.role_search.read(cx).focus_handle.clone();
+                        focus.focus(window, cx);
+                    }
+                }
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(BODY)
+                    .text_color(ui.text)
+                    .child(selected.map_or("No Agency role", |role| role.name)),
+            )
+            .child(select_chevron(ui));
+        if open {
+            let query = editor.role_search.read(cx).value().to_lowercase();
+            let mut menu = select_menu("agent-profile-role-menu", ui)
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    if let Some(editor) = this.agent_profile_editor.as_mut() {
+                        editor.role_menu_open = false;
+                    }
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                            if event.keystroke.key != "enter" {
+                                return;
+                            }
+                            if let Some(editor) = this.agent_profile_editor.as_mut() {
+                                let query = editor.role_search.read(cx).value();
+                                if !query.trim().is_empty() {
+                                    if let Some(role) = matching_agency_roles(&query).first() {
+                                        editor.agency_role = Some(role.id.to_string());
+                                    } else {
+                                        return;
+                                    }
+                                }
+                                editor.role_menu_open = false;
+                                editor.error = None;
+                            }
+                            this.update_agent_profile_suggested_name(cx);
+                            this.settings_focus.focus(window, cx);
+                            cx.stop_propagation();
+                            cx.notify();
+                        }))
+                        .child(input_box(editor.role_search.clone(), false, ui)),
+                )
+                .child(
+                    select_option("agent-profile-role-none", selected.is_none(), ui)
+                        .text_color(ui.text)
+                        .accessible_control(gpui::accesskit::Role::MenuItem, "No Agency role")
+                        .on_press(cx.listener(|this, _, _, cx| {
+                            if let Some(editor) = this.agent_profile_editor.as_mut() {
+                                editor.agency_role = None;
+                                editor.role_menu_open = false;
+                                editor.error = None;
+                            }
+                            this.update_agent_profile_suggested_name(cx);
+                            cx.notify();
+                        }))
+                        .child("No Agency role"),
+                );
+            for role in matching_agency_roles(&query) {
+                let id = role.id;
+                menu = menu.child(
+                    select_option(
+                        SharedString::from(format!("agency-role-{id}")),
+                        editor.agency_role.as_deref() == Some(id),
+                        ui,
+                    )
+                    .accessible_control(gpui::accesskit::Role::MenuItem, role.name)
+                    .on_press(cx.listener(move |this, _, _, cx| {
+                        if let Some(editor) = this.agent_profile_editor.as_mut() {
+                            editor.agency_role = Some(id.to_string());
+                            editor.role_menu_open = false;
+                            editor.error = None;
+                        }
+                        this.update_agent_profile_suggested_name(cx);
+                        cx.notify();
+                    }))
+                    .h(px(AGENT_ROW_HEIGHT))
+                    .child(
+                        div()
+                            .flex_col()
+                            .min_w_0()
+                            .text_color(ui.text)
+                            .child(div().truncate().child(role.name))
+                            .child(
+                                div()
+                                    .text_size(LABEL_SM)
+                                    .text_color(ui.muted)
+                                    .truncate()
+                                    .child(format!("{} · {}", role.category, role.description)),
+                            ),
+                    ),
+                );
+            }
+            trigger = trigger.child(deferred_select_menu(menu));
+        }
+        div().relative().w_full().child(trigger).into_any_element()
+    }
+
     fn render_agent_profile_base_select(
         &self,
         editor: &AgentProfileEditor,
@@ -1350,6 +2506,9 @@ impl PaneFlowApp {
             cx.stop_propagation();
             if let Some(editor) = this.agent_profile_editor.as_mut() {
                 editor.agent_menu_open = !is_open;
+                editor.model_menu_open = false;
+                editor.role_menu_open = false;
+                editor.effort_menu_open = false;
             }
             this.settings_focus.focus(window, cx);
             cx.notify();
@@ -1390,9 +2549,26 @@ impl PaneFlowApp {
                 .cursor(CursorStyle::Arrow)
                 .on_click(cx.listener(move |this, _: &ClickEvent, _w, cx| {
                     if let Some(editor) = this.agent_profile_editor.as_mut() {
+                        if editor.agent != agent {
+                            editor.model_input.update(cx, |input, cx| {
+                                input.set_value(SharedString::from(""), cx)
+                            });
+                            editor.effort = None;
+                            editor.effort_menu_open = false;
+                            editor.custom_model = false;
+                            editor.model_menu_open = false;
+                            editor.models.clear();
+                            if !matches!(agent, TerminalAgent::ClaudeCode | TerminalAgent::Codex) {
+                                editor.agency_role = None;
+                                editor.skills.clear();
+                            }
+                        }
                         editor.agent = agent;
                         editor.agent_menu_open = false;
+                        editor.error = None;
                     }
+                    this.update_agent_profile_suggested_name(cx);
+                    this.refresh_agent_profile_models(cx);
                     cx.notify();
                 }))
                 .child(agent_icon_sized(agent, 14., ui))
@@ -1488,15 +2664,68 @@ impl PaneFlowApp {
         editor: &AgentProfileEditor,
         cx: &mut Context<Self>,
     ) -> String {
-        let mut parts = vec![editor.agent.binary().to_string()];
-        parts.extend(
-            self.agent_profile_args_input
+        let model = editor.model_input.read(cx).value();
+        let entry = AgentProfileConfig {
+            name: "Preview".to_string(),
+            agent: editor.agent.tag().to_string(),
+            model: (!model.trim().is_empty()).then(|| model.trim().to_string()),
+            agency_role: editor.agency_role.clone(),
+            skills: editor.skills.clone(),
+            default_profile: editor.default_profile.clone(),
+            effort: editor.effort.clone(),
+            project: editor.project.clone(),
+            args: self
+                .agent_profile_args_input
                 .read(cx)
                 .value()
                 .split_whitespace()
-                .map(str::to_string),
-        );
-        parts.join(" ")
+                .map(str::to_string)
+                .collect(),
+            ..AgentProfileConfig::default()
+        };
+        match AgentProfile::for_project(&entry, &self.cached_config, editor.project.as_deref()) {
+            Ok(profile) => {
+                let skip = if entry.agency_role.is_some() {
+                    if profile.agent == TerminalAgent::ClaudeCode {
+                        4
+                    } else {
+                        2
+                    }
+                } else {
+                    0
+                };
+                let mut display_args = Vec::new();
+                let mut args = profile.args.into_iter().skip(skip).peekable();
+                while let Some(arg) = args.next() {
+                    if arg == "--append-system-prompt"
+                        || (arg == "-c"
+                            && args
+                                .peek()
+                                .is_some_and(|value| value.starts_with("developer_instructions=")))
+                    {
+                        args.next();
+                    } else {
+                        display_args.push(arg);
+                    }
+                }
+                let mut preview = std::iter::once(profile.agent.binary().to_string())
+                    .chain(display_args)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if let Some(role) = entry
+                    .agency_role
+                    .as_deref()
+                    .and_then(paneflow_mcp_install::agency::role)
+                {
+                    preview.push_str(&format!(" · {}", role.name));
+                }
+                if !entry.skills.is_empty() {
+                    preview.push_str(&format!(" · {} skills", entry.skills.len()));
+                }
+                preview
+            }
+            Err(error) => error,
+        }
     }
 
     pub(crate) fn open_agent_profile_editor(
@@ -1504,14 +2733,95 @@ impl PaneFlowApp {
         index: Option<usize>,
         cx: &mut Context<Self>,
     ) {
-        let entry = index.and_then(|idx| self.cached_config.agent_profiles.get(idx).cloned());
+        if self.agent_profiles_busy || self.agent_setup_review.is_some() {
+            self.show_toast("Profiles are still saving; try again shortly", cx);
+            return;
+        }
+        let mut index = index;
+        let mut entry = index.and_then(|idx| self.cached_config.agent_profiles.get(idx).cloned());
+        if let Some(project) = &self.agent_profiles_project
+            && let Some(profile) = entry.as_mut()
+            && profile.project.is_none()
+        {
+            profile.default_profile = Some(profile.name.clone());
+            profile.project = Some(project.clone());
+            profile.name = suggested_profile_name(
+                Some(project),
+                profile.agency_role.as_deref(),
+                TerminalAgent::from_tag(&profile.agent).unwrap_or(TerminalAgent::ClaudeCode),
+                &self.cached_config.agent_profiles,
+                None,
+            );
+            index = None;
+        }
+        let entry_default_profile = entry
+            .as_ref()
+            .and_then(|profile| profile.default_profile.clone());
+        let entry_skills = entry
+            .as_ref()
+            .map_or_else(Vec::new, |profile| profile.skills.clone());
         let agent = entry
             .as_ref()
             .and_then(|entry| TerminalAgent::from_tag(entry.agent.trim()))
-            .unwrap_or(TerminalAgent::ClaudeCode);
+            .unwrap_or_else(|| {
+                if self
+                    .agent_profiles_project
+                    .as_deref()
+                    .is_some_and(|project| {
+                        AgentProfile::orchestrator_model(
+                            &self.cached_config,
+                            project,
+                            TerminalAgent::Codex,
+                        )
+                        .is_ok()
+                    })
+                {
+                    TerminalAgent::Codex
+                } else {
+                    TerminalAgent::ClaudeCode
+                }
+            });
+        let agency_role = entry.as_ref().and_then(|entry| entry.agency_role.clone());
+        let project = entry.as_ref().map_or_else(
+            || self.agent_profiles_project.clone(),
+            |entry| entry.project.clone(),
+        );
+        let model = entry
+            .as_ref()
+            .and_then(|entry| entry.model.clone())
+            .unwrap_or_else(|| {
+                if entry.is_none()
+                    && project.as_ref().is_some_and(|project| {
+                        AgentProfile::orchestrator_model(&self.cached_config, project, agent)
+                            .is_ok()
+                    })
+                {
+                    ORCHESTRATOR_MODEL.to_string()
+                } else {
+                    String::new()
+                }
+            });
+        let model_input = cx.new(|cx| {
+            TextInput::new(model.clone(), "Model ID", cx).with_accessible_name("Agent model")
+        });
+        let effort = entry.as_ref().and_then(|entry| entry.effort.clone());
+
+        let suggested_name = suggested_profile_name(
+            project.as_deref(),
+            agency_role.as_deref(),
+            agent,
+            &self.cached_config.agent_profiles,
+            index,
+        );
+        let role_search = cx.new(|cx| {
+            TextInput::new("", "Find a role or language…", cx)
+                .with_accessible_name("Find an Agency role")
+        });
+        cx.observe(&role_search, |_, _, cx| cx.notify()).detach();
+        cx.observe(&model_input, |_, _, cx| cx.notify()).detach();
         let (name, env, args) = entry
             .map(|entry| (entry.name, entry.env, entry.args.join(" ")))
-            .unwrap_or_default();
+            .unwrap_or_else(|| (suggested_name.clone(), BTreeMap::new(), String::new()));
         self.agent_profile_name_input.update(cx, |input, cx| {
             input.set_value(SharedString::from(name), cx)
         });
@@ -1525,13 +2835,38 @@ impl PaneFlowApp {
         if env_rows.is_empty() {
             env_rows.push(new_env_row("", "", cx));
         }
+        let skill_input = cx.new(|cx| {
+            TextInput::new("", "Taste, use taste skill, or ~/.../SKILL.md", cx)
+                .with_accessible_name("Skill name or Markdown path")
+        });
+        cx.observe(&skill_input, |_, _, cx| cx.notify()).detach();
         self.agent_profile_editor = Some(AgentProfileEditor {
+            model_input,
+            models: Vec::new(),
+            model_menu_open: false,
+            model_catalog_generation: 0,
+            custom_model: !model.trim().is_empty() && model != ORCHESTRATOR_MODEL,
+            effort,
+            effort_menu_open: false,
+            project,
+            default_profile: entry_default_profile,
+            skills: entry_skills,
+            skill_input,
+            available_skills: Vec::new(),
+            skills_loading: false,
+            skills_generation: 0,
+            suggested_name,
+            role_search,
+            role_menu_open: false,
+            agency_role,
             index,
             agent,
             agent_menu_open: false,
             error: None,
             env_rows,
         });
+        self.refresh_agent_profile_models(cx);
+        self.refresh_agent_profile_skills(cx);
         cx.notify();
     }
 
@@ -1549,6 +2884,10 @@ impl PaneFlowApp {
     }
 
     fn save_agent_profile(&mut self, cx: &mut Context<Self>) {
+        if self.agent_profiles_busy || self.agent_setup_review.is_some() {
+            self.show_toast("Profiles are still saving; try again shortly", cx);
+            return;
+        }
         let Some(editor) = self.agent_profile_editor.as_ref() else {
             return;
         };
@@ -1556,6 +2895,12 @@ impl PaneFlowApp {
         let agent = editor.agent;
         let name = self.agent_profile_name_input.read(cx).value();
         let args_text = self.agent_profile_args_input.read(cx).value();
+        let model = editor.model_input.read(cx).value();
+        let agency_role = editor.agency_role.clone();
+        let effort = editor.effort.clone();
+        let project = editor.project.clone();
+        let default_profile = editor.default_profile.clone();
+        let skills = editor.skills.clone();
         let raw_env: Vec<(String, String)> = editor
             .env_rows
             .iter()
@@ -1566,12 +2911,19 @@ impl PaneFlowApp {
         let draft = collect_env(&raw_env).and_then(|env| {
             validate_env_values(&env, home.as_deref())?;
             let entry = AgentProfileConfig {
+                model: (!model.trim().is_empty()).then(|| model.trim().to_string()),
+                agency_role,
+                effort,
+                project,
+                default_profile,
+                skills,
                 name: name.trim().to_string(),
                 agent: agent.tag().to_string(),
                 env,
                 args: args_text.split_whitespace().map(str::to_string).collect(),
             };
-            AgentProfile::from_config(&entry).map(|_| entry)
+            AgentProfile::for_project(&entry, &self.cached_config, entry.project.as_deref())
+                .map(|_| entry)
         });
         let entry = match draft {
             Ok(entry) => entry,
@@ -1585,20 +2937,97 @@ impl PaneFlowApp {
         };
 
         let mut profiles = self.cached_config.agent_profiles.clone();
+        if profiles.iter().enumerate().any(|(idx, existing)| {
+            Some(idx) != index
+                && existing.name.eq_ignore_ascii_case(&entry.name)
+                && entry.default_profile.as_deref() != Some(existing.name.as_str())
+                && (existing.applies_to_project(entry.project.as_deref())
+                    || entry.applies_to_project(existing.project.as_deref()))
+        }) {
+            if let Some(editor) = self.agent_profile_editor.as_mut() {
+                editor.error = Some("Choose a unique profile name for this project".to_string());
+            }
+            cx.notify();
+            return;
+        }
+        if let Some(idx) = index
+            && let Some(previous) = profiles.get(idx)
+            && previous.project.is_none()
+            && previous.name != entry.name
+        {
+            let old_name = previous.name.clone();
+            for profile in &mut profiles {
+                if profile
+                    .default_profile
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(&old_name))
+                {
+                    profile.default_profile = Some(entry.name.clone());
+                }
+            }
+        }
         match index {
             Some(idx) if idx < profiles.len() => profiles[idx] = entry,
             _ => profiles.push(entry),
         }
-        self.agent_profile_editor = None;
-        self.persist_agent_profiles(profiles, cx);
+        let pending_editor = self.agent_profile_editor.take();
+        self.persist_agent_profiles(profiles, pending_editor, cx);
+    }
+
+    fn add_agency_profiles(&mut self, cx: &mut Context<Self>) {
+        if self.integration_busy.is_some()
+            || self.agent_profiles_busy
+            || self.agent_setup_review.is_some()
+        {
+            return;
+        }
+        let mut profiles = self.cached_config.agent_profiles.clone();
+        let project = self.agent_profiles_project.clone();
+        for mut profile in AgentProfile::agency_defaults() {
+            if !profiles.iter().any(|existing| {
+                existing.agency_role == profile.agency_role && existing.project == project
+            }) {
+                profile.project = project.clone();
+                profile.name = suggested_profile_name(
+                    project.as_deref(),
+                    profile.agency_role.as_deref(),
+                    TerminalAgent::ClaudeCode,
+                    &profiles,
+                    None,
+                );
+                profiles.push(profile);
+            }
+        }
+        self.persist_agent_profiles(profiles, None, cx);
+        if self.agent_profiles_project.is_none() {
+            self.change_integration("claude-code".to_string(), true, cx);
+        }
     }
 
     fn delete_agent_profile(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if self.agent_profiles_busy || self.agent_setup_review.is_some() {
+            self.show_toast("Profiles are still saving; try again shortly", cx);
+            return;
+        }
         if idx >= self.cached_config.agent_profiles.len() {
             return;
         }
         let mut profiles = self.cached_config.agent_profiles.clone();
-        profiles.remove(idx);
+        if self.agent_profiles_project.is_some() && profiles[idx].project.is_none() {
+            return;
+        }
+        let removed = profiles.remove(idx);
+        if removed.project.is_none() {
+            for profile in &mut profiles {
+                if profile
+                    .default_profile
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(&removed.name))
+                {
+                    profile.default_profile = None;
+                }
+            }
+        }
         if self
             .agent_profile_editor
             .as_ref()
@@ -1606,20 +3035,62 @@ impl PaneFlowApp {
         {
             self.agent_profile_editor = None;
         }
-        self.persist_agent_profiles(profiles, cx);
+        self.persist_agent_profiles(profiles, None, cx);
     }
 
     fn persist_agent_profiles(
         &mut self,
         profiles: Vec<AgentProfileConfig>,
+        pending_editor: Option<AgentProfileEditor>,
         cx: &mut Context<Self>,
     ) {
-        let value = if profiles.is_empty() {
-            serde_json::Value::Null
-        } else {
-            serde_json::to_value(profiles).unwrap_or(serde_json::Value::Null)
-        };
-        self.persist_setting(false, "agent_profiles", value, cx);
+        let scope = self.agent_profiles_project.clone();
+        let skills_to_validate = pending_editor.as_ref().map(|editor| editor.skills.clone());
+        self.agent_profiles_busy = true;
+        cx.spawn(async move |this, cx| {
+            let (profiles, prepared) = smol::unblock(move || {
+                let result = skills_to_validate
+                    .as_deref()
+                    .map_or(Ok(()), crate::agent_profile_context::validate_skill_paths)
+                    .and_then(|()| crate::agent_launcher::prepare_profile_roles(&profiles));
+                (profiles, result)
+            })
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                this.agent_profiles_busy = false;
+
+                if let Err(error) = prepared {
+                    if this.settings_section == Some(crate::SettingsSection::Agents)
+                        && this.agent_profiles_project == scope
+                    {
+                        this.agent_profile_editor = pending_editor;
+                    }
+                    this.show_toast(format!("Could not save agent profiles: {error}"), cx);
+                    return;
+                }
+                let value = if profiles.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    match serde_json::to_value(profiles) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            if this.settings_section == Some(crate::SettingsSection::Agents)
+                                && this.agent_profiles_project == scope
+                            {
+                                this.agent_profile_editor = pending_editor;
+                            }
+                            this.show_toast(
+                                format!("Could not serialize agent profiles: {error}"),
+                                cx,
+                            );
+                            return;
+                        }
+                    }
+                };
+                this.persist_setting(false, "agent_profiles", value, cx);
+            });
+        })
+        .detach();
     }
 }
 
@@ -1890,6 +3361,65 @@ fn agent_icon_sized(agent: TerminalAgent, size: f32, ui: crate::theme::UiColors)
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn project_role_names_are_suggested_and_numbered_without_cross_project_collisions() {
+        use super::*;
+        let project = std::env::temp_dir().join("felco-app");
+        let name = suggested_profile_name(
+            Some(&project),
+            Some("ui-designer"),
+            TerminalAgent::Codex,
+            &[],
+            None,
+        );
+        assert_eq!(name, "felco-app UI Designer");
+        let profiles = vec![AgentProfileConfig {
+            name: name.clone(),
+            project: Some(project.clone()),
+            ..Default::default()
+        }];
+        assert_eq!(
+            suggested_profile_name(
+                Some(&project),
+                Some("ui-designer"),
+                TerminalAgent::Codex,
+                &profiles,
+                None
+            ),
+            "felco-app UI Designer 2"
+        );
+        assert_eq!(
+            suggested_profile_name(
+                Some(&project),
+                Some("ui-designer"),
+                TerminalAgent::Codex,
+                &profiles,
+                Some(0)
+            ),
+            name
+        );
+        assert_eq!(
+            suggested_profile_name(None, Some("ui-designer"), TerminalAgent::Codex, &[], None),
+            "Agency UI Designer"
+        );
+    }
+
+    #[test]
+    fn agency_role_search_finds_language_and_division_expertise() {
+        assert!(
+            super::matching_agency_roles("RuSt")
+                .iter()
+                .any(|role| role.id == "engineering-rust-refactoring-specialist")
+        );
+        assert!(
+            super::matching_agency_roles("Design")
+                .iter()
+                .any(|role| role.id == "ui-designer")
+        );
+        assert!(!super::matching_agency_roles("Laravel").is_empty());
+        assert!(super::matching_agency_roles("no-such-expertise-42").is_empty());
+    }
+
     use super::*;
 
     #[test]

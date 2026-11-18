@@ -524,6 +524,9 @@ impl PaneFlowApp {
             let cwd = restored_workspace_cwd(&ws_session.cwd);
             let title = ws_session.title.clone();
             let ws_id = next_workspace_id_in(ws_session.space.as_ref());
+            if let Some(durable) = &ws_session.id {
+                crate::workspace::register_durable_workspace_id(ws_id, durable);
+            }
 
             if ws_session.tabs.len() > MAX_TABS_PER_WORKSPACE {
                 log::warn!(
@@ -558,6 +561,7 @@ impl PaneFlowApp {
             }
             let mut workspace =
                 Workspace::restored_with_id(ws_id, title.clone(), cwd, tabs, ws_session.active_tab);
+            workspace.restore_tab_hierarchy(&ws_session.tabs);
             if let Some(id) = &ws_session.id {
                 workspace.set_durable_id(id.clone());
             }

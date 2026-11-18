@@ -161,13 +161,19 @@ mod tests {
                 sidebar_agents: Some(vec!["claude-code".to_string()]),
             }),
             agent_profiles: vec![AgentProfileConfig {
+                project: Some(std::env::temp_dir().join("felco-app")),
+                default_profile: Some("Default Claude".to_string()),
+                skills: vec![std::env::temp_dir().join("skill/SKILL.md")],
+                model: Some("opus".to_string()),
+                agency_role: Some("orchestrator".to_string()),
+                effort: Some("high".to_string()),
                 name: "Claude perso".to_string(),
                 agent: "claude_code".to_string(),
                 env: BTreeMap::from([(
                     "CLAUDE_CONFIG_DIR".to_string(),
                     "~/.claude-perso".to_string(),
                 )]),
-                args: vec!["--model".to_string(), "opus".to_string()],
+                args: vec!["--verbose".to_string()],
             }],
             spaces: vec![SpaceConfig {
                 id: SpaceId::new(),

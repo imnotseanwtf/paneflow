@@ -63,6 +63,13 @@ paneflow watch --type ai.stop
 
 [Conductor docs →](docs/user/conductor.md)
 
+For a role-based team, open **Settings > Agents > Profiles > Add Agency
+Agents team**. This installs eight pinned [Agency Agents](https://github.com/msitarzewski/agency-agents)
+roles for Claude Code and creates editable launcher profiles. Choose a model
+for each profile, then launch **Agency Orchestrator** from the pane palette.
+Workers launched with `paneflow up team.workspace.toml --parent <surface-id>`
+open as child tabs under that session. [Agency team guide →](docs/agency-teams.md)
+
 To build your changes on GitHub, push to `main` or run **Actions > Linux
 preview > Run workflow**. Download the unsigned Linux packages from that
 run's **Artifacts** section. [Preview build instructions →](docs/release/runbook.md#workflow-layout)

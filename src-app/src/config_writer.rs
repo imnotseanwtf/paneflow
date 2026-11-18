@@ -97,6 +97,65 @@ pub fn save_config_values_checked<const N: usize>(values: [(&str, serde_json::Va
     write_config_checked(&path, &json)
 }
 
+pub(crate) fn agent_profiles_snapshot() -> Result<serde_json::Value, String> {
+    let path = paneflow_config::loader::config_path().ok_or("Cannot determine config path")?;
+    let _guard = config_write_guard();
+    let raw = load_raw_config(&path).map_err(|()| "Cannot read the existing configuration")?;
+    Ok(raw
+        .get("agent_profiles")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null))
+}
+
+pub(crate) fn import_agent_setup(
+    review: &crate::agent_setup::ImportReview,
+) -> Result<(Vec<paneflow_config::schema::AgentProfileConfig>, PathBuf), String> {
+    let path = paneflow_config::loader::config_path().ok_or("Cannot determine config path")?;
+    let home = paneflow_home::paneflow_home().ok_or("Cannot determine Paneflow home")?;
+    let _guard = config_write_guard();
+    apply_agent_setup(&path, &home.join("cache"), review)
+}
+
+fn apply_agent_setup(
+    path: &PathBuf,
+    backup_dir: &Path,
+    review: &crate::agent_setup::ImportReview,
+) -> Result<(Vec<paneflow_config::schema::AgentProfileConfig>, PathBuf), String> {
+    let mut raw = load_raw_config(path).map_err(|()| "Cannot read the existing configuration")?;
+    let current = raw
+        .get("agent_profiles")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    if current != review.expected {
+        return Err("Agent profiles changed since review. Import the file again to review the current changes".into());
+    }
+    let (profiles, _, _) = crate::agent_setup::merge(&current, &review.incoming)?;
+    let previous = if current.is_null() {
+        vec![]
+    } else {
+        serde_json::from_value(current)
+            .map_err(|error| format!("Cannot back up profiles: {error}"))?
+    };
+    let backup_bytes = crate::agent_setup::encode(&previous)?;
+    crate::agent_launcher::prepare_profile_roles(&profiles).map_err(|error| error.to_string())?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    let backup = backup_dir.join(format!(
+        "agent-setup-before-import-{}-{stamp}.json",
+        std::process::id()
+    ));
+    paneflow_home::create_private_dir_all(backup_dir).map_err(|error| error.to_string())?;
+    paneflow_home::write_atomically(&backup, &backup_bytes)
+        .map_err(|error| format!("Could not save backup: {error}"))?;
+    raw["agent_profiles"] = serde_json::to_value(&profiles).map_err(|error| error.to_string())?;
+    if !write_config_checked(path, &raw) {
+        return Err("Could not save imported profiles; existing profiles were kept".into());
+    }
+    Ok((profiles, backup))
+}
+
 fn merge_shortcut(
     shortcuts_obj: &mut serde_json::Map<String, serde_json::Value>,
     new_key: &str,
@@ -503,6 +562,43 @@ mod tests {
         save_setting_ordered_at, unbind_action, with_field, write_config_checked,
     };
     use serde_json::{Value, json};
+
+    #[test]
+    fn setup_import_preserves_other_settings_backs_up_and_refuses_stale_review() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("paneflow.json");
+        let incoming = root.path().join("incoming.json");
+        let before = json!({"font_size":17, "custom_future_key":true, "agent_profiles":[{"name":"Developer","agent":"codex"}]});
+        std::fs::write(&path, serde_json::to_vec(&before).unwrap()).unwrap();
+        let profile = paneflow_config::schema::AgentProfileConfig {
+            name: "Designer".into(),
+            agent: "codex".into(),
+            model: Some("gpt-reserve".into()),
+            ..Default::default()
+        };
+        std::fs::write(&incoming, crate::agent_setup::encode(&[profile]).unwrap()).unwrap();
+        let review =
+            crate::agent_setup::read_review(incoming, before["agent_profiles"].clone()).unwrap();
+        let (profiles, backup) =
+            super::apply_agent_setup(&path, &root.path().join("backups"), &review).unwrap();
+        assert_eq!(profiles.len(), 2);
+        let after = load_raw_config(&path).unwrap();
+        assert_eq!(after["font_size"], 17);
+        assert_eq!(after["custom_future_key"], true);
+        let restored = crate::agent_setup::read_review(backup, Value::Null).unwrap();
+        assert_eq!(restored.incoming.len(), 1);
+        assert_eq!(restored.incoming[0].name, "Developer");
+        assert!(super::apply_agent_setup(&path, &root.path().join("backups"), &review).is_err());
+        assert_eq!(load_raw_config(&path).unwrap(), after);
+        std::fs::write(&path, serde_json::to_vec(&before).unwrap()).unwrap();
+        let blocked_backup = root.path().join("not-a-directory");
+        std::fs::write(&blocked_backup, b"keep").unwrap();
+        assert!(super::apply_agent_setup(&path, &blocked_backup, &review).is_err());
+        assert_eq!(load_raw_config(&path).unwrap(), before);
+        std::fs::write(&path, b"{broken").unwrap();
+        assert!(super::apply_agent_setup(&path, &root.path().join("backups"), &review).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{broken");
+    }
 
     #[test]
     fn the_minimum_contrast_ladder_writes_off_and_removes_the_key_on_auto() {

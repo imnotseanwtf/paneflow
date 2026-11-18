@@ -44,6 +44,8 @@ pub(crate) fn parse_workspace_pane_plan(
 }
 
 pub(crate) struct WorkspaceUpRequest {
+    parent_surface_id: Option<u64>,
+    parent_session: Option<paneflow_config::schema::SessionId>,
     name: String,
     space: Option<String>,
     preset: String,
@@ -53,6 +55,26 @@ pub(crate) struct WorkspaceUpRequest {
 }
 
 impl WorkspaceUpRequest {
+    fn parent_tab(&self, workspaces: &[Workspace], cx: &App) -> Option<(usize, usize)> {
+        if let Some(surface) = self.parent_surface_id {
+            return surface_methods::find_pane_by_surface_id(workspaces, surface, cx)
+                .map(|location| (location.workspace_idx, location.tab_idx));
+        }
+        let session = self.parent_session.as_ref()?;
+        workspaces.iter().enumerate().find_map(|(ws_idx, ws)| {
+            ws.tabs()
+                .iter()
+                .position(|tab| {
+                    tab.any_pane(&mut |pane| {
+                        pane.read(cx).terminals().any(|terminal| {
+                            terminal.read(cx).terminal.session_id.as_str() == session.as_str()
+                        })
+                    })
+                })
+                .map(|tab_idx| (ws_idx, tab_idx))
+        })
+    }
+
     fn resolve_cwds(mut self) -> Result<Self, JsonRpcError> {
         for (i, pane) in self.planned.iter_mut().enumerate() {
             if let Some(raw) = pane.cwd.take() {
@@ -72,6 +94,23 @@ pub(crate) fn workspace_up_request(
 ) -> Result<WorkspaceUpRequest, JsonRpcError> {
     let name = opt_str(params, "name")?.unwrap_or("Workspace").to_string();
     let space = opt_str(params, "space")?.map(str::to_string);
+    let parent_surface_id = opt_u64(params, "parent_surface_id")?;
+    let parent_session = opt_str(params, "parent_session")?
+        .map(|value| {
+            paneflow_config::schema::SessionId::parse(value)
+                .map_err(|error| JsonRpcError::invalid_params(error.to_string()))
+        })
+        .transpose()?;
+    if parent_surface_id.is_some() && parent_session.is_some() {
+        return Err(JsonRpcError::invalid_params(
+            "choose either parent_surface_id or parent_session",
+        ));
+    }
+    if (parent_surface_id.is_some() || parent_session.is_some()) && space.is_some() {
+        return Err(JsonRpcError::invalid_params(
+            "a child team uses its parent's space",
+        ));
+    }
     let preset = opt_str(params, "layout")?.unwrap_or("even_h").to_string();
     let pane_specs = match params.get("panes").and_then(|p| p.as_array()) {
         Some(a) if !a.is_empty() => a,
@@ -106,6 +145,8 @@ pub(crate) fn workspace_up_request(
     }
     dedupe_planned_pane_labels(&mut planned);
     Ok(WorkspaceUpRequest {
+        parent_surface_id,
+        parent_session,
         name,
         space,
         preset,
@@ -441,7 +482,12 @@ impl PaneFlowApp {
         request: WorkspaceUpRequest,
         cx: &mut Context<Self>,
     ) -> serde_json::Value {
+        let parent_location = request.parent_tab(&self.workspaces, cx);
+        let parent_requested =
+            request.parent_surface_id.is_some() || request.parent_session.is_some();
         let WorkspaceUpRequest {
+            parent_surface_id: _,
+            parent_session: _,
             name,
             space,
             preset,
@@ -449,6 +495,23 @@ impl PaneFlowApp {
             managed_worktrees,
             pane_worktrees,
         } = request;
+        let parent = match parent_location {
+            Some((ws_idx, tab_idx)) => {
+                let ws = &self.workspaces[ws_idx];
+                if ws.tab_count() + planned.len() > crate::workspace::MAX_TABS_PER_WORKSPACE {
+                    return JsonRpcError::invalid_params(
+                        "child team exceeds the workspace tab limit",
+                    )
+                    .into_value();
+                }
+                Some((ws_idx, ws.tabs()[tab_idx].id))
+            }
+            None if parent_requested => {
+                return JsonRpcError::invalid_params("parent pane is no longer available")
+                    .into_value();
+            }
+            None => None,
+        };
         let preset = preset.as_str();
         let space = match self.target_space(space.as_deref()) {
             Ok(space) => space,
@@ -464,7 +527,20 @@ impl PaneFlowApp {
             })
             .collect();
 
-        let ws_id = next_workspace_id_in(space.as_ref());
+        let ws_id = parent.map_or_else(
+            || next_workspace_id_in(space.as_ref()),
+            |(index, _)| self.workspaces[index].id,
+        );
+        let parent_worktree = parent.and_then(|(index, id)| {
+            self.workspaces[index]
+                .tabs()
+                .iter()
+                .find(|tab| tab.id == id)
+                .and_then(|tab| tab.worktree.clone())
+        });
+        let parent_cwd = parent_worktree
+            .clone()
+            .or_else(|| parent.map(|(index, _)| PathBuf::from(&self.workspaces[index].cwd)));
         let mut panes: Vec<Entity<Pane>> = Vec::with_capacity(planned.len());
         let mut launches: Vec<(Entity<TerminalView>, Option<String>, Option<String>)> =
             Vec::with_capacity(planned.len());
@@ -473,7 +549,7 @@ impl PaneFlowApp {
             let terminal = cx.new(|cx| {
                 TerminalView::with_cwd_env_and_profile(
                     ws_id,
-                    pp.cwd.clone(),
+                    pp.cwd.clone().or_else(|| parent_cwd.clone()),
                     None,
                     env,
                     pp.profile,
@@ -493,7 +569,30 @@ impl PaneFlowApp {
         let requested_focus = requested_focus(&planned);
         let focus_idx = requested_focus.unwrap_or(0);
 
-        let groups = group_up_panes_by_worktree(&pane_worktrees);
+        let groups = if parent.is_some() {
+            pane_worktrees
+                .iter()
+                .enumerate()
+                .map(|(index, worktree)| {
+                    (
+                        worktree.clone().or_else(|| {
+                            planned[index]
+                                .cwd
+                                .is_none()
+                                .then(|| {
+                                    parent_worktree
+                                        .as_ref()
+                                        .map(|path| path.to_string_lossy().into_owned())
+                                })
+                                .flatten()
+                        }),
+                        vec![index],
+                    )
+                })
+                .collect()
+        } else {
+            group_up_panes_by_worktree(&pane_worktrees)
+        };
         let mut tabs: Vec<crate::workspace::Tab> = Vec::with_capacity(groups.len());
         let mut active_tab = 0;
         for (tab_idx, (worktree, pane_idxs)) in groups.iter().enumerate() {
@@ -507,21 +606,34 @@ impl PaneFlowApp {
                 return JsonRpcError::invalid_params("could not build layout from panes")
                     .into_value();
             };
-            let title = worktree
-                .as_ref()
-                .and_then(|path| {
-                    managed_worktrees
-                        .iter()
-                        .find(|mw| mw.path.to_string_lossy() == path.as_str())
-                        .map(|mw| mw.branch.clone())
-                })
-                .unwrap_or_default();
-            tabs.push(crate::workspace::Tab::restored(
+            let title = if parent.is_some() {
+                planned[pane_idxs[0]]
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| format!("{name} {}", tab_idx + 1))
+            } else {
+                worktree
+                    .as_ref()
+                    .and_then(|path| {
+                        managed_worktrees
+                            .iter()
+                            .find(|mw| mw.path.to_string_lossy() == path.as_str())
+                            .map(|mw| mw.branch.clone())
+                    })
+                    .unwrap_or_default()
+            };
+            let mut tab = crate::workspace::Tab::restored(
                 title,
-                paneflow_config::schema::TabTitleSource::Preset,
+                if parent.is_some() {
+                    paneflow_config::schema::TabTitleSource::User
+                } else {
+                    paneflow_config::schema::TabTitleSource::Preset
+                },
                 Some(tree),
                 worktree.as_ref().map(std::path::PathBuf::from),
-            ));
+            );
+            tab.parent_id = parent.map(|(_, id)| id);
+            tabs.push(tab);
         }
 
         let ws_cwd = groups
@@ -530,10 +642,34 @@ impl PaneFlowApp {
             .and_then(|(_, pane_idxs)| pane_idxs.iter().find_map(|i| planned[*i].cwd.clone()))
             .or_else(|| planned.iter().find_map(|p| p.cwd.clone()))
             .unwrap_or_else(crate::launch_cwd::implicit_launch_cwd);
-        let mut ws = Workspace::restored_with_id(ws_id, &name, ws_cwd, tabs, active_tab);
-        ws.managed_worktrees = managed_worktrees;
-        Self::spawn_initial_git_stats(ws_id, ws.cwd.clone(), cx);
-        let idx = self.add_workspace_in(ws, space);
+        let tab_ids: Vec<u64> = tabs.iter().map(|tab| tab.id).collect();
+        let idx = if let Some((index, _)) = parent {
+            let ws = &mut self.workspaces[index];
+            let first = ws.tab_count();
+            for tab in tabs {
+                if !ws.open_tab(tab) {
+                    return JsonRpcError::invalid_params("workspace tab limit reached")
+                        .into_value();
+                }
+            }
+            ws.set_active_tab(first + active_tab);
+            ws.sidebar_expanded = true;
+            for managed in managed_worktrees {
+                if !ws
+                    .managed_worktrees
+                    .iter()
+                    .any(|existing| existing.path == managed.path)
+                {
+                    ws.managed_worktrees.push(managed);
+                }
+            }
+            index
+        } else {
+            let mut ws = Workspace::restored_with_id(ws_id, &name, ws_cwd, tabs, active_tab);
+            ws.managed_worktrees = managed_worktrees;
+            Self::spawn_initial_git_stats(ws_id, ws.cwd.clone(), cx);
+            self.add_workspace_in(ws, space)
+        };
         self.activate_workspace_without_window(idx, cx);
         if let Some(pane) = requested_focus.and_then(|i| panes.get(i)) {
             self.pending_pane_focus = Some(pane.clone());
@@ -549,11 +685,12 @@ impl PaneFlowApp {
             }
         }
 
-        let panes_n = self.active_workspace().map_or(0, |ws| ws.pane_count());
+        let panes_n = surface_ids.len();
         self.save_session(cx);
         cx.notify();
         serde_json::json!({
             "index": idx, "title": name, "panes": panes_n,
+            "tab_ids": tab_ids, "parent_tab_id": parent.map(|(_, id)| id),
             "surface_ids": surface_ids, "labels": labels
         })
     }
@@ -919,6 +1056,47 @@ mod tests {
                 .unwrap_or_else(|| panic!("{params} must be refused"));
             assert_eq!(error.code, JsonRpcError::INVALID_PARAMS, "{params}");
         }
+    }
+
+    #[test]
+    fn child_teams_validate_the_parent_and_cannot_request_another_space() {
+        let request = workspace_up_request(
+            &serde_json::json!({"parent_surface_id": 7, "panes": [{"name": "designer"}]}),
+        )
+        .unwrap();
+        assert_eq!(request.parent_surface_id, Some(7));
+        let session = paneflow_config::schema::SessionId::new();
+        let request = workspace_up_request(
+            &serde_json::json!({"parent_session": session.as_str(), "panes": [{}]}),
+        )
+        .unwrap();
+        assert_eq!(request.parent_session, Some(session.clone()));
+        for params in [
+            serde_json::json!({"parent_session": "invalid", "panes": [{}]}),
+            serde_json::json!({"parent_session": 7, "panes": [{}]}),
+            serde_json::json!({"parent_surface_id": 7, "parent_session": session.as_str(), "panes": [{}]}),
+            serde_json::json!({"parent_session": session.as_str(), "space": "other", "panes": [{}]}),
+        ] {
+            assert!(workspace_up_request(&params).is_err(), "{params}");
+        }
+        for parent in [
+            serde_json::json!(-1),
+            serde_json::json!("7"),
+            serde_json::json!(true),
+        ] {
+            assert!(
+                workspace_up_request(
+                    &serde_json::json!({"parent_surface_id": parent, "panes": [{}]})
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            workspace_up_request(
+                &serde_json::json!({"parent_surface_id": 7, "space": "other", "panes": [{}]})
+            )
+            .is_err()
+        );
     }
 
     #[test]

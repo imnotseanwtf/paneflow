@@ -53,6 +53,13 @@ pub fn run(
         return Ok(EXIT_OK);
     }
 
+    up_cmd::prepare_pane_roles(
+        plan.units.iter().filter_map(|unit| match &unit.action {
+            UnitAction::Spawn(spawn) => Some(&spawn.pane),
+            _ => None,
+        }),
+        &config,
+    )?;
     Engine {
         client,
         on_failure: plan.on_failure,
@@ -187,22 +194,29 @@ fn prepare_runs(
     up_cmd::check_worktree_conflicts(&mut worktree_plans)?;
     let port_offsets = up_cmd::allocate_port_offsets(&port_refs, plan.port_base, port_is_free)?;
 
-    Ok(plan
-        .units
+    plan.units
         .iter()
         .cloned()
         .zip(commands.into_iter().zip(worktree_plans).zip(port_offsets))
         .map(|(unit, ((command, worktree), port_offset))| {
-            UnitRun::new(substitute_unit_env(unit, port_offset), command, worktree)
+            Ok(UnitRun::new(
+                substitute_unit_env(unit, port_offset, config)?,
+                command,
+                worktree,
+            ))
         })
-        .collect())
+        .collect::<Result<Vec<_>, CliError>>()
 }
 
-fn substitute_unit_env(mut unit: Unit, port_offset: Option<u16>) -> Unit {
+fn substitute_unit_env(
+    mut unit: Unit,
+    port_offset: Option<u16>,
+    config: &PaneFlowConfig,
+) -> Result<Unit, CliError> {
     if let UnitAction::Spawn(s) = &mut unit.action {
-        s.pane.env = up_cmd::substitute_env(s.pane.env.as_ref(), port_offset);
+        s.pane.env = up_cmd::resolve_env(&s.pane, config, port_offset)?;
     }
-    unit
+    Ok(unit)
 }
 
 enum State {
@@ -997,6 +1011,8 @@ mod tests {
             needs: Vec::new(),
             action: UnitAction::Spawn(Box::new(flow_spec::SpawnUnit {
                 pane: crate::cli::workspace_spec::PaneSpec {
+                    model: None,
+                    effort: None,
                     cwd: None,
                     agent: None,
                     command: Some("true".to_string()),

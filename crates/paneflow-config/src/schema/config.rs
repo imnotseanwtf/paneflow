@@ -878,15 +878,118 @@ where
 pub struct AgentProfileConfig {
     pub name: String,
     pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<std::path::PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<std::path::PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agency_role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
 }
 
+impl AgentProfileConfig {
+    pub fn applies_to_project(&self, project: Option<&std::path::Path>) -> bool {
+        match self.project.as_deref() {
+            None => true,
+            Some(scope) => project.is_some_and(|project| {
+                #[cfg(windows)]
+                {
+                    std::path::Path::new(&project.to_string_lossy().to_lowercase())
+                        .starts_with(scope.to_string_lossy().to_lowercase())
+                }
+                #[cfg(not(windows))]
+                {
+                    project.starts_with(scope)
+                }
+            }),
+        }
+    }
+}
+
+impl PaneFlowConfig {
+    pub fn agent_profile_applies(
+        &self,
+        profile: &AgentProfileConfig,
+        project: Option<&std::path::Path>,
+    ) -> bool {
+        profile.applies_to_project(project)
+            && (profile.project.is_some()
+                || !self.agent_profiles.iter().any(|override_profile| {
+                    override_profile.project.is_some()
+                        && override_profile.applies_to_project(project)
+                        && override_profile
+                            .default_profile
+                            .as_deref()
+                            .is_some_and(|name| name.eq_ignore_ascii_case(&profile.name))
+                }))
+    }
+
+    pub fn agency_profiles_for_project<'a>(
+        &'a self,
+        role: &'a str,
+        project: Option<&'a std::path::Path>,
+    ) -> impl Iterator<Item = &'a AgentProfileConfig> {
+        let matches = move |profile: &&AgentProfileConfig| {
+            profile.agency_role.as_deref() == Some(role)
+                && self.agent_profile_applies(profile, project)
+        };
+        self.agent_profiles.iter().filter(matches)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_profiles_are_isolated_and_override_shared_role_defaults() {
+        let root = std::env::temp_dir();
+        let felco = root.join("felco-app");
+        let other = root.join("other-app");
+        let child = felco.join("src");
+        let sibling = root.join("felco-app-other");
+        let config = PaneFlowConfig {
+            agent_profiles: [
+                ("Shared Designer", None),
+                ("felco-app UI Designer", Some(felco.clone())),
+                ("other-app UI Designer", Some(other.clone())),
+            ]
+            .into_iter()
+            .map(|(name, project)| AgentProfileConfig {
+                name: name.to_string(),
+                default_profile: project.as_ref().map(|_| "Shared Designer".to_string()),
+                project,
+                agency_role: Some("ui-designer".to_string()),
+                ..Default::default()
+            })
+            .collect(),
+            ..Default::default()
+        };
+        let names = |project| {
+            config
+                .agency_profiles_for_project("ui-designer", project)
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(Some(felco.as_path())), ["felco-app UI Designer"]);
+        assert_eq!(names(Some(&child)), ["felco-app UI Designer"]);
+        assert_eq!(names(Some(other.as_path())), ["other-app UI Designer"]);
+        assert_eq!(names(Some(&sibling)), ["Shared Designer"]);
+        assert_eq!(names(None), ["Shared Designer"]);
+        let old: AgentProfileConfig =
+            serde_json::from_str(r#"{"name":"Old","agent":"codex"}"#).unwrap();
+        assert!(old.project.is_none());
+        assert!(old.applies_to_project(Some(&felco)));
+    }
 
     #[test]
     fn on_quit_defaults_to_ask_and_tolerates_garbage() {

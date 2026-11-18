@@ -213,7 +213,7 @@ impl PaneFlowApp {
         cx.observe(&space_name_input, |_, _, cx| cx.notify())
             .detach();
         let agent_profile_args_input = cx.new(|cx| {
-            crate::widgets::text_input::TextInput::new("", "--model opus", cx)
+            crate::widgets::text_input::TextInput::new("", "--verbose", cx)
                 .with_accessible_name("Extra arguments")
         });
         cx.observe(&agent_profile_args_input, |_, _, cx| cx.notify())
@@ -294,6 +294,7 @@ impl PaneFlowApp {
             git_watch_counts,
             git_probed_at: std::collections::HashMap::new(),
             settings_section: None,
+            agent_profiles_project: None,
             settings_scroll: gpui::ScrollHandle::new(),
             settings_drag: None,
             settings_search_input,
@@ -312,6 +313,8 @@ impl PaneFlowApp {
             workspace_pane_command_input,
             workspace_pane_prompt_input,
             agent_profile_editor: None,
+            agent_profiles_busy: false,
+            agent_setup_review: None,
             agents_list_expanded: false,
             agents_list_animation: None,
             integration_status: None,

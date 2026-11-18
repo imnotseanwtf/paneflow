@@ -356,6 +356,11 @@ pub(crate) fn run() {
     crate::tmux_compat::ensure_shim_link();
     startup_trace::mark("bridge_extracted");
 
+    if let Err(error) = agent_launcher::prepare_profile_roles(
+        &paneflow_config::loader::load_config().agent_profiles,
+    ) {
+        log::warn!("paneflow: could not prepare Agency role files: {error}");
+    }
     host_bootstrap::start_in_background();
     worker_bootstrap::start_in_background();
 

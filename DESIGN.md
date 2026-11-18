@@ -1545,6 +1545,40 @@ workspace's only surface.
 
 ## 6. Interaction
 
+Agent teams appear as child tabs under their lead tab in the workspace rail.
+Each generation takes one existing folder-slot-plus-title-gap indentation;
+rows retain the normal tab typography, hover skin, truncation, and status lane.
+Parents have a shared action-button chevron with an expand/collapse label and
+an accessible expanded state. Tree item levels follow the displayed depth.
+Search reveals matched children and their ancestors. Status grouping keeps
+its existing flat presentation.
+
+Global Agents settings contains **Default profiles**. Project agent settings
+opens from the workspace context menu or the default page. Its header names
+the project, lists inherited defaults and project additions, and excludes the
+global permission and CLI installation controls. Editing an inherited default
+creates a project copy; removing the copy restores the default. The profile
+editor's scope follows its page rather than an editable Project field.
+
+The editor separates Base agent, Name, Agency role, Skills, Model and Effort.
+New project profile names follow the project folder and role, with a numeric
+suffix for repeated roles; custom names are preserved. Skill rows show their
+original directory, a path tooltip and a detach action. Add skill uses the
+native file/folder picker. Model and effort use shared select controls.
+Codex models and their effort values come from its local account catalog;
+Other model exposes a text field for custom IDs. Project workers offer
+Default (Orchestrator’s model), selected for new profiles when a compatible
+configured Orchestrator exists. That choice preserves the worker role and
+effort and resolves the saved Orchestrator model on launch. Orchestrator
+profiles cannot select it themselves. Account default and Agent default omit
+their respective native override. Changing the base agent clears
+incompatible model and effort selections. The role menu searches by name,
+language and division; Enter picks the first match and Escape closes open
+menus before leaving the editor.
+
+Adding presets preserves customized profiles and does not launch the team
+or change prompt-submission permissions.
+
 ### 6.1 Keyboard first
 
 `secondary` maps to Cmd on macOS and Ctrl elsewhere. Every overlay has a
@@ -1700,3 +1734,11 @@ already need the same behavior.
 - `reduce_motion` stops hover interpolation, the toggle slide, the sidebar slide, the resize edge
   nudge, the resize detent settle, the Workspaces row motion, menu reveals, and the thinking matrix only; the other animations
   listed in 4.8 ignore it.
+
+Default profile settings includes **Export setup…** and **Import setup…** for
+all saved agent profiles. Import displays counts, each incoming profile's
+settings and unavailable skill references, then requires **Apply import** or
+**Cancel**. Profile editing waits until that review is dismissed. A failed
+import preserves the review and saved data. File picker cancellation leaves
+profiles untouched. This flow uses the existing settings cards and native file
+pickers on all desktop platforms.

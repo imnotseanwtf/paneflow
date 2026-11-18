@@ -1,5 +1,6 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod agency;
 pub mod agents;
 pub mod api;
 pub mod cli;

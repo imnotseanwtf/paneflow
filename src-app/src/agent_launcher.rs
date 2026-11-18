@@ -188,6 +188,16 @@ impl TerminalAgent {
     pub fn supports_current_platform(self) -> bool {
         self.runtime().supports_current_platform()
     }
+
+    pub fn effort_levels(self) -> &'static [&'static str] {
+        match self {
+            Self::ClaudeCode => &["low", "medium", "high", "xhigh", "max"],
+            Self::Codex => &[
+                "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+            ],
+            _ => &[],
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,12 +223,22 @@ impl AgentCommandSpec {
     }
 
     pub(crate) fn render_shell_command(&self) -> String {
+        self.render_shell_command_for_shell(None)
+    }
+
+    fn render_shell_command_for_shell(&self, shell: Option<&str>) -> String {
+        let quoting = shell
+            .map(crate::terminal::types::ShellQuoting::for_shell)
+            .unwrap_or_else(crate::terminal::types::ShellQuoting::default_for_platform);
         debug_assert!(is_plain_shell_token(self.program));
         let mut command = self.program.to_string();
         for arg in &self.args {
-            debug_assert!(is_plain_shell_token(arg));
             command.push(' ');
-            command.push_str(arg);
+            if is_plain_shell_token(arg) {
+                command.push_str(arg);
+            } else {
+                command.push_str(&crate::terminal::quote_path_for_shell(arg, quoting));
+            }
         }
         command
     }
@@ -396,10 +416,79 @@ pub struct AgentProfile {
     pub agent: TerminalAgent,
     pub env: BTreeMap<String, String>,
     pub args: Vec<String>,
+    pub agency_role: Option<String>,
+    pub skills: Vec<std::path::PathBuf>,
 }
 
+pub(crate) const ORCHESTRATOR_MODEL: &str = "@orchestrator";
+
 impl AgentProfile {
+    pub(crate) fn orchestrator_model(
+        config: &PaneFlowConfig,
+        project: &std::path::Path,
+        agent: TerminalAgent,
+    ) -> Result<String, String> {
+        let mut profiles: Vec<_> = config
+            .agency_profiles_for_project("orchestrator", Some(project))
+            .collect();
+        if profiles.iter().any(|profile| profile.project.is_some()) {
+            profiles.retain(|profile| profile.project.is_some());
+        }
+        let [lead] = profiles.as_slice() else {
+            return Err(
+                "Set up exactly one Orchestrator profile for this project before using its model"
+                    .to_string(),
+            );
+        };
+        if lead.model.as_deref() == Some(ORCHESTRATOR_MODEL) {
+            return Err("The Orchestrator must select its own model".to_string());
+        }
+        let lead_profile = Self::from_config(lead)?;
+        if lead_profile.agent != agent {
+            return Err(format!(
+                "The Orchestrator uses {}; choose the same base agent or select a model explicitly",
+                lead_profile.agent.display_name()
+            ));
+        }
+        lead.model
+            .clone()
+            .ok_or_else(|| "Select an explicit model in the Orchestrator profile first".to_string())
+    }
+
+    pub(crate) fn for_project(
+        entry: &AgentProfileConfig,
+        config: &PaneFlowConfig,
+        project: Option<&std::path::Path>,
+    ) -> Result<Self, String> {
+        if entry.model.as_deref() != Some(ORCHESTRATOR_MODEL) {
+            return Self::from_config(entry);
+        }
+        if entry.agency_role.as_deref() == Some("orchestrator") {
+            return Err("The Orchestrator must select its own model".to_string());
+        }
+        let project = entry.project.as_deref().or(project).ok_or_else(|| {
+            "Orchestrator model defaults are available in project settings".to_string()
+        })?;
+        let agent = TerminalAgent::from_tag(entry.agent.trim())
+            .ok_or_else(|| format!("unknown base agent '{}'", entry.agent))?;
+        let mut resolved = entry.clone();
+        resolved.model = Some(Self::orchestrator_model(config, project, agent)?);
+        Self::from_config(&resolved)
+    }
+
     pub fn from_config(entry: &AgentProfileConfig) -> Result<AgentProfile, String> {
+        if entry.default_profile.is_some() && entry.project.is_none() {
+            return Err("Only project profiles can customize a default profile".to_string());
+        }
+        if entry.project.as_ref().is_some_and(|project| {
+            !project.is_absolute()
+                || project.to_str().is_none()
+                || project
+                    .components()
+                    .any(|part| part == std::path::Component::ParentDir)
+        }) {
+            return Err("project must be an absolute directory without '..'".to_string());
+        }
         let name = entry.name.trim();
         if name.is_empty() {
             return Err("profile name is empty".to_string());
@@ -415,19 +504,111 @@ impl AgentProfile {
                 "argument '{arg}' may only contain letters, digits, '-', '_', '.', and '='"
             ));
         }
+        let mut args = Vec::new();
+        if !entry.skills.is_empty() {
+            if !matches!(agent, TerminalAgent::ClaudeCode | TerminalAgent::Codex) {
+                return Err("Attached skills support Claude Code and Codex".to_string());
+            }
+            crate::agent_profile_context::validate_skill_selection(&entry.skills)?;
+        }
+        if let Some(role_id) = entry.agency_role.as_deref() {
+            if !matches!(agent, TerminalAgent::ClaudeCode | TerminalAgent::Codex) {
+                return Err("Agency roles support Claude Code and Codex".to_string());
+            }
+            let role = paneflow_mcp_install::agency::role(role_id)
+                .ok_or_else(|| format!("unknown Agency role '{role_id}'"))?;
+            let home = paneflow_home::paneflow_home()
+                .ok_or_else(|| "cannot resolve the Paneflow home".to_string())?;
+            if agent == TerminalAgent::ClaudeCode {
+                args.extend([
+                    "--agent".to_string(),
+                    format!("paneflow-agency:{}", role.agent_name()),
+                    "--plugin-dir".to_string(),
+                    paneflow_mcp_install::agency::launch_file(&home, role_id, "plugin")
+                        .to_string_lossy()
+                        .into_owned(),
+                ]);
+            } else {
+                args.extend([
+                    "-c".to_string(),
+                    format!(
+                        "model_instructions_file={}",
+                        paneflow_mcp_install::agency::launch_file(&home, role_id, "md")
+                            .to_string_lossy()
+                    ),
+                ]);
+            }
+        }
+        if let Some(model) = entry.model.as_deref() {
+            if !matches!(agent, TerminalAgent::ClaudeCode | TerminalAgent::Codex)
+                || model.starts_with('-')
+                || !is_plain_shell_token(model)
+            {
+                return Err("model must be a plain Claude Code or Codex model name".to_string());
+            }
+            args.extend(["--model".to_string(), model.to_string()]);
+        }
+        if let Some(effort) = entry.effort.as_deref() {
+            let valid = agent.effort_levels().contains(&effort);
+            if !valid {
+                return Err("effort is not supported by the selected base agent".to_string());
+            }
+            if agent == TerminalAgent::ClaudeCode {
+                args.extend(["--effort".to_string(), effort.to_string()]);
+            } else {
+                args.extend(["-c".to_string(), format!("model_reasoning_effort={effort}")]);
+            }
+        }
+        if !entry.skills.is_empty() {
+            let guidance = crate::agent_profile_context::skill_guidance(&entry.skills);
+            if agent == TerminalAgent::ClaudeCode {
+                args.extend(["--append-system-prompt".to_string(), guidance]);
+            } else {
+                args.extend([
+                    "-c".to_string(),
+                    format!(
+                        "developer_instructions={}",
+                        serde_json::to_string(&guidance).map_err(|error| error.to_string())?
+                    ),
+                ]);
+            }
+        }
+        if entry.args.iter().any(|arg| {
+            (entry.model.is_some()
+                && (matches!(arg.as_str(), "--model" | "-m") || arg.starts_with("--model=")))
+                || (entry.agency_role.is_some()
+                    && (matches!(arg.as_str(), "--agent" | "--agents")
+                        || arg.starts_with("--agent=")
+                        || arg.starts_with("--agents=")
+                        || arg.starts_with("model_instructions_file=")))
+                || (entry.effort.is_some()
+                    && (arg == "--effort"
+                        || arg.starts_with("--effort=")
+                        || arg.starts_with("model_reasoning_effort=")))
+                || (!entry.skills.is_empty()
+                    && (arg == "--append-system-prompt"
+                        || arg.starts_with("--append-system-prompt=")
+                        || arg.starts_with("developer_instructions=")))
+        }) {
+            return Err("set the model, effort and Agency role in their profile fields, without duplicate extra arguments".to_string());
+        }
+        args.extend(entry.args.clone());
         Ok(AgentProfile {
             name: name.to_string(),
             agent,
             env: entry.env.clone(),
-            args: entry.args.clone(),
+            args,
+            agency_role: entry.agency_role.clone(),
+            skills: entry.skills.clone(),
         })
     }
 
-    pub fn all(config: &PaneFlowConfig) -> Vec<AgentProfile> {
+    pub fn all(config: &PaneFlowConfig, project: Option<&std::path::Path>) -> Vec<AgentProfile> {
         config
             .agent_profiles
             .iter()
-            .filter_map(|entry| match Self::from_config(entry) {
+            .filter(|entry| config.agent_profile_applies(entry, project))
+            .filter_map(|entry| match Self::for_project(entry, config, project) {
                 Ok(profile) => Some(profile),
                 Err(reason) => {
                     log::warn!("agent_profiles: skipping '{}': {reason}", entry.name);
@@ -437,12 +618,29 @@ impl AgentProfile {
             .collect()
     }
 
+    pub fn agency_defaults() -> Vec<AgentProfileConfig> {
+        paneflow_mcp_install::agency::STARTER_ROLES
+            .iter()
+            .filter_map(|id| paneflow_mcp_install::agency::role(id))
+            .map(|role| AgentProfileConfig {
+                name: format!("Agency {}", role.name),
+                agent: "claude_code".to_string(),
+                model: Some(role.default_model.to_string()),
+                agency_role: Some(role.id.to_string()),
+                ..AgentProfileConfig::default()
+            })
+            .collect()
+    }
+
     pub fn launch_command(&self, config: &PaneFlowConfig) -> String {
         let mut spec = self.agent.launch_spec(config);
         for arg in &self.args {
             spec.push_arg(arg.clone());
         }
-        wrap_for_shell(&spec.render_shell_command(), config)
+        wrap_for_shell(
+            &spec.render_shell_command_for_shell(config.default_shell.as_deref()),
+            config,
+        )
     }
 
     pub fn process_env(&self) -> HashMap<String, String> {
@@ -507,11 +705,11 @@ fn with_extra_presets(agents: impl Iterator<Item = TerminalAgent>) -> Vec<AgentL
 }
 
 impl AgentLaunch {
-    pub fn all(config: &PaneFlowConfig) -> Vec<AgentLaunch> {
+    pub fn all(config: &PaneFlowConfig, project: Option<&std::path::Path>) -> Vec<AgentLaunch> {
         with_extra_presets(TerminalAgent::for_this_platform())
             .into_iter()
             .chain(
-                AgentProfile::all(config)
+                AgentProfile::all(config, project)
                     .into_iter()
                     .filter(|profile| profile.agent.supports_current_platform())
                     .map(AgentLaunch::Profile),
@@ -519,7 +717,7 @@ impl AgentLaunch {
             .collect()
     }
 
-    pub fn visible(config: &PaneFlowConfig) -> Vec<AgentLaunch> {
+    pub fn visible(config: &PaneFlowConfig, project: Option<&std::path::Path>) -> Vec<AgentLaunch> {
         with_extra_presets(
             TerminalAgent::visible(config)
                 .into_iter()
@@ -527,7 +725,7 @@ impl AgentLaunch {
         )
         .into_iter()
         .chain(
-            AgentProfile::all(config)
+            AgentProfile::all(config, project)
                 .into_iter()
                 .filter(|profile| profile.agent.supports_current_platform())
                 .map(AgentLaunch::Profile),
@@ -610,6 +808,25 @@ fn prime_installed_binary_cache(found: HashSet<&'static str>) {
     cache.found = found;
     cache.checked_at = Some(Instant::now());
     cache.refreshing = false;
+}
+
+pub(crate) fn prepare_profile_roles(profiles: &[AgentProfileConfig]) -> std::io::Result<()> {
+    let ids: Vec<_> = profiles
+        .iter()
+        .filter_map(|profile| profile.agency_role.as_deref())
+        .filter(|id| paneflow_mcp_install::agency::role(id).is_some())
+        .collect();
+    prepare_role_ids(&ids)
+}
+
+pub(crate) fn prepare_role_ids(ids: &[&str]) -> std::io::Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let home = paneflow_home::paneflow_home().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "cannot resolve Paneflow home")
+    })?;
+    paneflow_mcp_install::agency::prepare_roles(&home, ids.iter().copied())
 }
 
 #[cfg(test)]
@@ -790,6 +1007,22 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn generated_role_paths_are_one_literal_shell_argument() {
+        let value = "model_instructions_file=/tmp/a path/o'neil/$(false)/role.md";
+        let mut command = AgentCommandSpec::new("printf");
+        command.push_arg("%s");
+        command.push_arg(value);
+        let rendered = command.render_shell_command_for_shell(Some("bash"));
+        let output = std::process::Command::new("sh")
+            .args(["-c", &rendered])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), value);
+    }
+
     #[test]
     fn launch_spec_plain_token_guard_matches_agent_command_surface() {
         for agent in TerminalAgent::all() {
@@ -909,12 +1142,238 @@ mod tests {
         AgentProfileConfig {
             name: name.to_string(),
             agent: agent.to_string(),
+            model: None,
+            agency_role: None,
+            effort: None,
+            project: None,
+            default_profile: None,
+            skills: Vec::new(),
             env: BTreeMap::from([(
                 "CLAUDE_CONFIG_DIR".to_string(),
                 "~/.claude-perso".to_string(),
             )]),
             args: vec!["--model".to_string(), "opus".to_string()],
         }
+    }
+
+    #[test]
+    fn agency_profiles_apply_their_role_and_selected_model_without_flag_injection() {
+        let mut entry = AgentProfile::agency_defaults()
+            .into_iter()
+            .find(|entry| entry.agency_role.as_deref() == Some("ui-designer"))
+            .unwrap();
+        entry.model = Some("haiku".to_string());
+        let profile = AgentProfile::from_config(&entry).unwrap();
+        assert_eq!(
+            &profile.args[..3],
+            [
+                "--agent",
+                "paneflow-agency:paneflow-agency-ui-designer",
+                "--plugin-dir"
+            ]
+        );
+        assert!(profile.args[3].ends_with("ui-designer.plugin"));
+        assert_eq!(&profile.args[4..], ["--model", "haiku"]);
+        for model in ["", "-p", "sonnet;exit", "two words"] {
+            entry.model = Some(model.to_string());
+            assert!(AgentProfile::from_config(&entry).is_err(), "{model}");
+        }
+        entry.model = Some("sonnet".to_string());
+        entry.args = vec!["--model=opus".to_string()];
+        assert!(AgentProfile::from_config(&entry).is_err());
+        entry.args.clear();
+        entry.agent = "codex".to_string();
+        entry.model = Some("gpt-6".to_string());
+        entry.effort = Some("high".to_string());
+        let profile = AgentProfile::from_config(&entry).unwrap();
+        assert!(profile.args[1].starts_with("model_instructions_file="));
+        assert!(
+            profile
+                .args
+                .iter()
+                .any(|arg| arg == "model_reasoning_effort=high")
+        );
+        assert!(
+            profile
+                .launch_command(&PaneFlowConfig::default())
+                .contains("codex")
+        );
+        entry.effort = None;
+        entry.agent = "claude_code".to_string();
+        entry.agency_role = Some("unknown".to_string());
+        assert!(AgentProfile::from_config(&entry).is_err());
+    }
+
+    #[test]
+    fn project_launcher_hides_other_projects_and_validates_native_effort_options() {
+        let project = std::env::temp_dir().join("felco-app");
+        let mut config = PaneFlowConfig {
+            agent_profiles: vec![
+                profile_entry("Shared", "codex"),
+                profile_entry("Project", "codex"),
+            ],
+            ..Default::default()
+        };
+        config.agent_profiles[1].project = Some(project.clone());
+        assert_eq!(AgentProfile::all(&config, Some(&project)).len(), 2);
+        assert_eq!(AgentProfile::all(&config, None).len(), 1);
+        assert_eq!(
+            AgentProfile::all(&config, Some(&project.with_file_name("other-app"))).len(),
+            1
+        );
+        for agent in [TerminalAgent::ClaudeCode, TerminalAgent::Codex] {
+            let mut entry = profile_entry("Test", agent.tag());
+            for effort in agent.effort_levels() {
+                entry.effort = Some((*effort).to_string());
+                assert!(AgentProfile::from_config(&entry).is_ok(), "{effort}");
+            }
+            entry.effort = Some(
+                if agent == TerminalAgent::Codex {
+                    "unsupported"
+                } else {
+                    "minimal"
+                }
+                .to_string(),
+            );
+            assert!(AgentProfile::from_config(&entry).is_err());
+        }
+    }
+
+    #[test]
+    fn selected_skills_reach_both_native_launches_without_global_installation() {
+        let path = std::env::temp_dir().join("selected-skill").join("SKILL.md");
+        for agent in [TerminalAgent::ClaudeCode, TerminalAgent::Codex] {
+            let mut entry = profile_entry("Skilled", agent.tag());
+            entry.args.clear();
+            entry.skills = vec![path.clone()];
+            let profile = AgentProfile::from_config(&entry).unwrap();
+            assert!(
+                profile
+                    .args
+                    .iter()
+                    .any(|arg| arg.contains("Skills assigned to this agent"))
+            );
+            assert_eq!(profile.skills.as_slice(), std::slice::from_ref(&path));
+            if agent == TerminalAgent::Codex {
+                let value = profile
+                    .args
+                    .iter()
+                    .find_map(|arg| arg.strip_prefix("developer_instructions="))
+                    .unwrap();
+                let parsed: toml::Value = format!("instructions={value}").parse().unwrap();
+                assert!(
+                    parsed["instructions"]
+                        .as_str()
+                        .unwrap()
+                        .contains("SKILL.md")
+                );
+            } else {
+                assert!(
+                    profile
+                        .args
+                        .iter()
+                        .any(|arg| arg == "--append-system-prompt")
+                );
+            }
+            entry.args = vec!["developer_instructions=override".to_string()];
+            assert!(AgentProfile::from_config(&entry).is_err());
+        }
+    }
+
+    #[test]
+    fn orchestrator_model_defaults_follow_the_project_copy_without_flattening_the_setting() {
+        let project = std::env::temp_dir().join("felco-app");
+        let mut lead = profile_entry("Orchestrator", "codex");
+        lead.args.clear();
+        lead.agency_role = Some("orchestrator".to_string());
+        lead.model = Some("gpt-reserve".to_string());
+        let mut local = lead.clone();
+        local.name = "felco-app Orchestrator".to_string();
+        local.default_profile = Some(lead.name.clone());
+        local.project = Some(project.clone());
+        local.model = Some("gpt-6.2-sol".to_string());
+        let mut config = PaneFlowConfig {
+            agent_profiles: vec![lead, local],
+            ..Default::default()
+        };
+        let mut worker = profile_entry("felco-app Designer", "codex");
+        worker.args.clear();
+        worker.project = Some(project.clone());
+        worker.model = Some(ORCHESTRATOR_MODEL.to_string());
+        worker.effort = Some("high".to_string());
+        let args = AgentProfile::for_project(&worker, &config, Some(&project))
+            .unwrap()
+            .args;
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--model", "gpt-6.2-sol"])
+        );
+        assert!(args.iter().any(|arg| arg == "model_reasoning_effort=high"));
+        config.agent_profiles[1].model = Some("gpt-6.2-astra".to_string());
+        assert!(
+            AgentProfile::for_project(&worker, &config, Some(&project))
+                .unwrap()
+                .args
+                .iter()
+                .any(|arg| arg == "gpt-6.2-astra")
+        );
+        worker.project = Some(project.with_file_name("other-app"));
+        assert!(
+            AgentProfile::for_project(&worker, &config, worker.project.as_deref())
+                .unwrap()
+                .args
+                .iter()
+                .any(|arg| arg == "gpt-reserve")
+        );
+        assert_eq!(worker.model.as_deref(), Some(ORCHESTRATOR_MODEL));
+        assert!(AgentProfile::from_config(&worker).is_err());
+    }
+
+    #[test]
+    fn orchestrator_model_defaults_refuse_cross_cli_ambiguity_and_self_inheritance() {
+        let project = std::env::temp_dir().join("felco-app");
+        let mut lead = profile_entry("Orchestrator", "claude_code");
+        lead.args.clear();
+        lead.agency_role = Some("orchestrator".to_string());
+        lead.model = Some("haiku".to_string());
+        let mut config = PaneFlowConfig {
+            agent_profiles: vec![lead],
+            ..Default::default()
+        };
+        assert!(
+            AgentProfile::orchestrator_model(&config, &project, TerminalAgent::Codex)
+                .unwrap_err()
+                .contains("same base agent")
+        );
+        assert_eq!(
+            AgentProfile::orchestrator_model(&config, &project, TerminalAgent::ClaudeCode).unwrap(),
+            "haiku"
+        );
+        config.agent_profiles[0].model = None;
+        assert!(
+            AgentProfile::orchestrator_model(&config, &project, TerminalAgent::ClaudeCode).is_err()
+        );
+        config.agent_profiles[0].model = Some(ORCHESTRATOR_MODEL.to_string());
+        assert!(
+            AgentProfile::orchestrator_model(&config, &project, TerminalAgent::ClaudeCode).is_err()
+        );
+        config.agent_profiles[0].model = Some("haiku".to_string());
+        let mut alternative = config.agent_profiles[0].clone();
+        alternative.name = "Alternative Orchestrator".to_string();
+        config.agent_profiles.push(alternative);
+        assert!(
+            AgentProfile::orchestrator_model(&config, &project, TerminalAgent::ClaudeCode)
+                .unwrap_err()
+                .contains("exactly one")
+        );
+        let mut project_lead = config.agent_profiles[0].clone();
+        project_lead.name = "Project Orchestrator".to_string();
+        project_lead.project = Some(project.clone());
+        config.agent_profiles.push(project_lead);
+        assert_eq!(
+            AgentProfile::orchestrator_model(&config, &project, TerminalAgent::ClaudeCode).unwrap(),
+            "haiku"
+        );
     }
 
     #[test]
@@ -954,11 +1413,11 @@ mod tests {
             agent_profiles: vec![profile_entry("Good", "codex"), profile_entry("Bad", "nope")],
             ..PaneFlowConfig::default()
         };
-        let profiles = AgentProfile::all(&config);
+        let profiles = AgentProfile::all(&config, None);
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].agent, TerminalAgent::Codex);
         assert_eq!(
-            AgentLaunch::all(&config).len(),
+            AgentLaunch::all(&config, None).len(),
             TerminalAgent::all()
                 .filter(|agent| agent.supports_current_platform())
                 .map(|agent| {
@@ -1036,7 +1495,7 @@ mod tests {
     #[test]
     fn launch_presets_follow_catalog_platforms_without_hiding_presentation() {
         let config = PaneFlowConfig::default();
-        let builtins = AgentLaunch::all(&config)
+        let builtins = AgentLaunch::all(&config, None)
             .into_iter()
             .filter_map(|launch| match launch {
                 AgentLaunch::Builtin(agent) => Some(agent),
@@ -1063,7 +1522,7 @@ mod tests {
     #[test]
     fn the_claude_team_preset_launches_through_the_tmux_shim_off_windows_only() {
         let config = PaneFlowConfig::default();
-        let team = AgentLaunch::all(&config)
+        let team = AgentLaunch::all(&config, None)
             .into_iter()
             .find(AgentLaunch::tmux_compat);
         if cfg!(windows) {
@@ -1113,7 +1572,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["claude-code", "codex", "amp", "gemini", "github-copilot"]
         );
-        let launcher = AgentLaunch::all(&PaneFlowConfig::default());
+        let launcher = AgentLaunch::all(&PaneFlowConfig::default(), None);
         assert_eq!(
             launcher
                 .iter()

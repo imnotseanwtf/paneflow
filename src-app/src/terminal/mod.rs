@@ -9,6 +9,7 @@ mod ghostty_session;
 mod ghostty_stress;
 pub(crate) mod host_link;
 mod input;
+pub(crate) use input::quote_path_for_shell;
 pub mod kitty;
 mod marks;
 mod path_picker;

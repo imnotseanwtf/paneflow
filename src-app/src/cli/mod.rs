@@ -8,6 +8,7 @@ mod flow_cmd;
 mod flow_spec;
 mod host_cmd;
 mod read_cmds;
+mod role_routing;
 mod selector;
 mod send_cmd;
 mod serve_cmd;
@@ -348,6 +349,11 @@ enum Commands {
             help = "Validate + print the resolved plan without touching the instance"
         )]
         dry_run: bool,
+        #[arg(
+            long,
+            help = "Open each worker as a child tab under a pane selected by id, name, or 'self' for the calling session"
+        )]
+        parent: Option<String>,
     },
     #[command(
         about = "Block until a pane goes idle, or a regex appears in its output (orchestration)"
@@ -682,7 +688,11 @@ fn dispatch(command: Commands, client: &CliTransport) -> Result<i32, CliError> {
             json,
             scope,
         }) => flow_cmd::run(client, &file, dry_run, json, scope == "all"),
-        Commands::Up { file, dry_run } => up_cmd::up(client, &file, dry_run),
+        Commands::Up {
+            file,
+            dry_run,
+            parent,
+        } => up_cmd::up(client, &file, dry_run, parent.as_deref()),
         Commands::Wait {
             selector,
             pattern,

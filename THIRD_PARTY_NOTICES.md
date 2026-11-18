@@ -5,6 +5,16 @@ travels with the code they cover. Native archive components are listed
 separately in
 [native/libghostty/THIRD_PARTY_NOTICES.md](native/libghostty/THIRD_PARTY_NOTICES.md).
 
+## Agency Agents
+
+The eight role definitions under `assets/agency-agents/` are copied from
+[Agency Agents](https://github.com/msitarzewski/agency-agents), revision
+`8ae6164602c95ca78828b148b9052460ee426885`. They are copyright 2025 AgentLand
+Contributors and distributed under the [MIT license](assets/agency-agents/LICENSE).
+Paneflow preserves the upstream definitions and adds its own runtime guidance
+to the Claude Code agent files it installs. The accompanying license is also
+installed alongside those files.
+
 ## Unpeel terminal palette and runtime catalog model
 
 The ANSI palette, foreground, background, cursor, and selection values of the

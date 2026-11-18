@@ -154,11 +154,21 @@ impl PaneFlowApp {
         let tab_group = SharedString::from(format!("tab-row-group-{tab_id}"));
         let drag_preview_width = self.sidebar_width() - 2. * SIDEBAR_ROW_MARGIN_X;
         let grouped_by_status = self.grouped_by_status();
+        let depth = if grouped_by_status {
+            0
+        } else {
+            ws.tab_depth(tab_idx)
+        };
+        let has_children = !grouped_by_status && ws.tab_has_children(tab_idx);
+        let children_collapsed = tab.children_collapsed;
         let indent_guide =
             !grouped_by_status && self.cached_config.sidebar_show.indent_guide_enabled();
         let title_indent = SIDEBAR_FOLDER_SLOT_WIDTH + SIDEBAR_TITLE_ROW_GAP;
-        let row_inset = if indent_guide { title_indent } else { 0. };
-        let content_width = sidebar_workspace_row_content_width(self.sidebar_width()) - row_inset;
+        let available_width = sidebar_workspace_row_content_width(self.sidebar_width());
+        let row_inset = (if indent_guide { title_indent } else { 0. }
+            + depth as f32 * title_indent)
+            .min((available_width - 4. * title_indent).max(0.));
+        let content_width = available_width - row_inset;
         let shows_checkout =
             grouped_by_status || tab_has_own_checkout(tab.worktree.as_deref(), &ws.worktree_root);
         let diffstat = shows_checkout
@@ -214,8 +224,38 @@ impl PaneFlowApp {
             .w(px(content_width))
             .max_w(px(content_width))
             .min_w_0()
-            .when(!indent_guide && !grouped_by_status, |row| {
-                row.child(div().flex_none().w(px(SIDEBAR_FOLDER_SLOT_WIDTH)))
+            .when(
+                !grouped_by_status
+                    && !has_children
+                    && (!indent_guide || ws.tabs().iter().any(|tab| tab.parent_id.is_some())),
+                |row| row.child(div().flex_none().w(px(SIDEBAR_FOLDER_SLOT_WIDTH))),
+            )
+            .when(has_children, |row| {
+                row.child(
+                    sidebar_action_button(
+                        SharedString::from(format!("tab-children-{tab_id}")),
+                        if children_collapsed {
+                            "icons/workspace/chevron-right.svg"
+                        } else {
+                            "icons/workspace/chevron-down.svg"
+                        },
+                        12.,
+                        if children_collapsed {
+                            "Expand child agents"
+                        } else {
+                            "Collapse child agents"
+                        }
+                        .into(),
+                        ui,
+                    )
+                    .size(px(SIDEBAR_FOLDER_SLOT_WIDTH))
+                    .on_click(cx.listener(
+                        move |this, _: &ClickEvent, _window, cx| {
+                            cx.stop_propagation();
+                            this.toggle_tab_children(ws_idx, tab_id, cx);
+                        },
+                    )),
+                )
             })
             .child(sidebar_title_with_trailing(
                 titled,
@@ -258,7 +298,8 @@ impl PaneFlowApp {
             .ml(px(row_inset))
             .id(SharedString::from(format!("tab-row-{tab_id}")))
             .role(Role::TreeItem)
-            .aria_level(if grouped_by_status { 1 } else { 2 })
+            .aria_level(if grouped_by_status { 1 } else { 2 + depth })
+            .when(has_children, |row| row.aria_expanded(!children_collapsed))
             .aria_label(SharedString::from(if picked >= 0.5 {
                 format!("{row_name}, selected")
             } else {

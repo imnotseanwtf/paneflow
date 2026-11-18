@@ -704,6 +704,8 @@ fn test_tab_title_source_survives_a_roundtrip() {
             vec![
                 TabSession {
                     title: "sprint 3".to_string(),
+                    parent_tab: None,
+                    children_collapsed: false,
                     title_source: Some(TabTitleSource::User),
                     layout: None,
                     worktree: None,
@@ -713,6 +715,8 @@ fn test_tab_title_source_survives_a_roundtrip() {
                 },
                 TabSession {
                     title: "wire up the parser".to_string(),
+                    parent_tab: None,
+                    children_collapsed: false,
                     title_source: Some(TabTitleSource::Prompt),
                     layout: None,
                     worktree: Some("/home/user/project.worktrees/parser".to_string()),

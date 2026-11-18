@@ -561,6 +561,8 @@ fn instantiate(spec: &FlowSpec, step: &StepSpec, item: Option<&str>) -> Result<U
         pane.cwd = pane.cwd.map(|v| sub(&v));
         pane.prompt = pane.prompt.map(|v| sub(&v));
         pane.name = pane.name.map(|v| sub(&v));
+        pane.model = pane.model.map(|v| sub(&v));
+        pane.effort = pane.effort.map(|v| sub(&v));
         pane.worktree = pane.worktree.map(|v| sub(&v));
         pane.from = pane.from.map(|v| sub(&v));
         pane.env = pane

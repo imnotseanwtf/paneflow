@@ -85,7 +85,7 @@ impl PaneFlowApp {
         if crate::agent_launcher::installed_binary_scan_pending() {
             return "Looking for agent CLIs on this machine.".to_string();
         }
-        let mut names: Vec<&str> = AgentLaunch::all(&self.cached_config)
+        let mut names: Vec<&str> = AgentLaunch::all(&self.cached_config, None)
             .iter()
             .filter(|launch| launch.is_installed())
             .map(|launch| launch.agent().display_name())

@@ -167,6 +167,22 @@ starts, not a sentinel that was merely echoed in your prompt. `watch` emits
 
 ### Spawn hooked agents with `paneflow up`
 
+For visible delegated workers under your own session, use
+`paneflow up <file> --parent self`. This resolves your durable
+`PANEFLOW_SESSION_ID`, including after a window restart. A unique pane name
+or numeric surface ID from `paneflow ls` can also be passed explicitly. Each pane in
+the specification becomes its own child tab in your workspace. Omit `space`;
+the team inherits your space. Omit `cwd` to inherit your tab's worktree or
+workspace directory. Parentless `up` continues to create an independent workspace.
+
+When the Agency Agents integration is installed, choose role aliases such as
+`agency-planner`, `agency-ui-designer`, `agency-ui-developer`,
+`agency-core-developer`, `agency-qa-tester`, `agency-code-reviewer`, or
+`agency-devops` as the pane's `agent`. Each role uses its saved profile's model;
+an explicit `model` in the specification overrides it. Choose only the roles
+the task needs, assign bounded work with clear file ownership, and preserve
+the existing submission and messaging permission gates.
+
 Spawn agents from a declarative spec, NOT by typing `paneflow send <shell>
 "claude" --submit` into a bare shell. An agent launched via `up` is **hooked**
 (turn events, `last_result`) and gets a stable name, cwd, and
@@ -289,3 +305,21 @@ target or re-send rather than waiting forever on a turn that is not running.
 
 When a command exits non-zero, read the message, fix the target or surface the
 problem to the user - do not retry the identical command.
+
+### Mixed-provider role pools
+
+Agency profiles separate expertise from the base CLI, model and effort. Use
+explicit profile names for combinations such as a Claude Designer, a Codex
+Designer and two Developers. If several profiles share an Agency role, use
+`round_robin = true` in an `up` team file to rotate that role alias across its
+profiles. This chooses providers for new sessions; reuse existing worker tabs
+for follow-up tasks, rotating assignments among the selected workers when the
+user asks. Staged handoffs use the flow runner. Sending and submitting prompts
+still requires the existing scripting permission or approved pane-write
+channel. Neither rotation nor nested tabs broadens those permissions.
+
+Inspect the repository's rules, manifests and existing source before deciding
+on languages, frameworks, tools or local skills. Agency examples do not impose
+Laravel, React or any other stack. Use relevant installed skills; propose a
+specific source before installing a missing skill, and use official docs when
+no suitable skill is installed.

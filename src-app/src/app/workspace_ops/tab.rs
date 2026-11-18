@@ -17,6 +17,28 @@ use crate::workspace::Tab;
 use crate::{CloseTab, NewTab, NextTab, PreviousTab, TabDrag};
 
 impl PaneFlowApp {
+    pub(crate) fn toggle_tab_children(
+        &mut self,
+        ws_idx: usize,
+        tab_id: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(ws) = self.workspaces.get_mut(ws_idx)
+            && let Some(index) = ws.tabs().iter().position(|tab| tab.id == tab_id)
+            && ws.tab_has_children(index)
+        {
+            if let Some(tab) = ws.tab_mut(index) {
+                tab.children_collapsed = !tab.children_collapsed;
+            }
+            self.sidebar_cursor = Some(crate::app::sidebar::keyboard::SidebarCursor::Tree {
+                workspace_id: ws.id,
+                tab_id: Some(tab_id),
+            });
+            self.save_session(cx);
+            cx.notify();
+        }
+    }
+
     pub(crate) fn toggle_workspace_expanded(&mut self, ws_idx: usize, cx: &mut Context<Self>) {
         if let Some(ws) = self.workspaces.get_mut(ws_idx) {
             ws.sidebar_expanded = !ws.sidebar_expanded;

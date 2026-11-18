@@ -343,6 +343,20 @@ impl PaneFlowApp {
             ("enter", SidebarRow::Tab(ws_idx, tab_idx)) => {
                 self.select_workspace_tab(ws_idx, tab_idx, window, cx);
             }
+            ("space", SidebarRow::Tab(ws_idx, tab_idx)) if !self.grouped_by_status() => {
+                let id = self.workspaces[ws_idx].tabs()[tab_idx].id;
+                self.toggle_tab_children(ws_idx, id, cx);
+            }
+            ("right", SidebarRow::Tab(ws_idx, tab_idx)) if !self.grouped_by_status() => {
+                let ws = &self.workspaces[ws_idx];
+                if ws.tab_has_children(tab_idx) {
+                    if ws.tabs()[tab_idx].children_collapsed {
+                        self.toggle_tab_children(ws_idx, ws.tabs()[tab_idx].id, cx);
+                    } else {
+                        self.move_sidebar_cursor(CursorMove::Next, cx);
+                    }
+                }
+            }
             ("space", SidebarRow::Folder(ws_idx)) => {
                 self.toggle_workspace_expanded(ws_idx, cx);
             }
@@ -358,9 +372,19 @@ impl PaneFlowApp {
                     self.toggle_workspace_expanded(ws_idx, cx);
                 }
             }
-            ("left", SidebarRow::Tab(ws_idx, _)) if !self.grouped_by_status() => {
-                self.sidebar_cursor = self.sidebar_cursor_for(SidebarRow::Folder(ws_idx));
-                cx.notify();
+            ("left", SidebarRow::Tab(ws_idx, tab_idx)) if !self.grouped_by_status() => {
+                let ws = &self.workspaces[ws_idx];
+                if ws.tab_has_children(tab_idx) && !ws.tabs()[tab_idx].children_collapsed {
+                    self.toggle_tab_children(ws_idx, ws.tabs()[tab_idx].id, cx);
+                } else {
+                    let row = ws
+                        .parent_tab_index(tab_idx)
+                        .map_or(SidebarRow::Folder(ws_idx), |parent| {
+                            SidebarRow::Tab(ws_idx, parent)
+                        });
+                    self.sidebar_cursor = self.sidebar_cursor_for(row);
+                    cx.notify();
+                }
             }
             ("f2", SidebarRow::Tab(ws_idx, tab_idx)) => {
                 self.begin_tab_rename(ws_idx, tab_idx, cx);

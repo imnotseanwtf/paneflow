@@ -43,6 +43,44 @@ deliberate: anything that runs *outside* the GUI process (shim, hook, MCP
 bridge, MCP installer logic) must stay GPU-free and tiny, so it lives in its
 own crate and never links GPUI.
 
+## Agent teams
+
+Agent teams reuse workspace tabs. A tab may refer to another tab in the same
+workspace through `parent_id`; the workspace owns traversal, folding, restore,
+and promotion when a parent closes. The persisted `TabSession::parent_tab`
+is a local index, remapped to fresh runtime IDs during restore. Invalid and
+cyclic references are cleared without dropping layouts. `workspace.up` with
+`parent_surface_id` or durable `parent_session` launches each planned pane in a child tab and keeps the
+existing parentless workspace path. The sidebar renders that hierarchy in
+workspace mode and retains its flat status grouping in status mode.
+
+Pinned Agency Agents definitions live in `assets/agency-agents`. The existing
+Claude integration installer owns their managed files, fingerprints, license,
+and removal policy. Profiles select a role and model through
+`AgentProfileConfig`; both the pane palette and CLI reuse `AgentProfile` to
+build the launch command. Claude and Codex get selected native prompt files
+from the Paneflow cache, with models and effort forwarded through their native
+flags. Profile saves prepare those files in the background; startup prepares
+configured roles before GPUI, and CLI launches prepare them before spawning.
+The role catalog is pinned and local. Team files may rotate matching profiles
+through a locked per-instance cursor; explicit profile names stay fixed.
+Profiles may bind to an absolute project directory; missing bindings stay
+global for compatibility. Launchers use the workspace repository identity,
+CLI plans use the pane/caller directory and existing Git location probe,
+and `default_profile` links full project copies to the defaults they replace.
+Global Agents settings edits defaults; workspace Agent settings edits the
+project. Native model catalogs and selected skill files are read off-thread.
+Skill assignments add per-session guidance referring to original files,
+without installing or executing their code. Model IDs and effort values stay
+native CLI arguments. The @orchestrator model alias resolves in AgentProfile
+with the project's saved Orchestrator and matching CLI; aliases never reach a
+native launch command unresolved. Project-specific leads take precedence,
+and missing, ambiguous or self-referencing defaults fail before launch. Rotation
+cursors are independent per project. Profile settings remain in the owned
+Paneflow home, rather than writing configuration into source repositories.
+File installation stays on the existing background
+integration path, outside GPUI rendering. See [the team guide](docs/agency-teams.md).
+
 ## Detached panes
 
 `app/detached_panes` opens a lightweight native GPUI window around the existing
@@ -1262,3 +1300,13 @@ cargo clippy --workspace -- -D warnings
 
 See the [README](README.md#build-from-source) for per-platform build
 instructions and system dependencies.
+
+Agent setup interchange is owned by `agent_setup.rs`: a versioned JSON envelope
+contains `AgentProfileConfig` records. It validates the envelope, field names,
+limits, profile identities and the merged launch configuration. Native settings
+pickers and file I/O run asynchronously. `config_writer.rs` owns the import
+transaction under its existing config mutex, compares the reviewed profile
+snapshot, saves a profile backup, and atomically changes only `agent_profiles`.
+Unknown application settings survive; stale reviews and failed backups refuse
+the write. Export files contain environment values and local path references,
+not agent authentication stores or bundled skill files.

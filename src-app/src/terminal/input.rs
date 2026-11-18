@@ -304,7 +304,7 @@ fn paths_to_pty_text(paths: &[std::path::PathBuf], shell_quoting: ShellQuoting) 
     }
 }
 
-pub(super) fn quote_path_for_shell(path: &str, shell_quoting: ShellQuoting) -> String {
+pub(crate) fn quote_path_for_shell(path: &str, shell_quoting: ShellQuoting) -> String {
     match shell_quoting {
         ShellQuoting::Posix | ShellQuoting::Wsl => quote_posix_path(path),
         ShellQuoting::PowerShell => quote_powershell_path(path),

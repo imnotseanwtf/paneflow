@@ -152,12 +152,19 @@ impl PaneFlowApp {
             source: PresetSource::Shell,
         }];
         presets.extend(
-            AgentLaunch::visible(&self.cached_config)
-                .into_iter()
-                .map(|launch| Preset {
-                    label: launch.label(),
-                    source: PresetSource::Agent(launch),
+            AgentLaunch::visible(
+                &self.cached_config,
+                self.workspaces.get(ws_idx).map(|ws| {
+                    ws.repo_root
+                        .as_deref()
+                        .unwrap_or_else(|| std::path::Path::new(&ws.cwd))
                 }),
+            )
+            .into_iter()
+            .map(|launch| Preset {
+                label: launch.label(),
+                source: PresetSource::Agent(launch),
+            }),
         );
         if let Some(ws) = self.workspaces.get(ws_idx) {
             presets.extend(ws.custom_buttons.iter().map(|button| Preset {

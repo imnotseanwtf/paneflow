@@ -178,6 +178,10 @@ impl<'de> Deserialize<'de> for TabTitleSource {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct TabSession {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_tab: Option<usize>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub children_collapsed: bool,
     #[serde(default)]
     pub title: String,
     #[serde(default)]
@@ -208,6 +212,8 @@ impl TabSession {
 
     pub fn with_layout(layout: LayoutNode) -> Self {
         Self {
+            parent_tab: None,
+            children_collapsed: false,
             title: String::new(),
             title_source: Some(TabTitleSource::Preset),
             layout: Some(layout),
@@ -390,6 +396,8 @@ fn demote_panes_to_focused_surface(node: &mut LayoutNode, promoted: &mut Vec<Tab
             for surface in drained {
                 let title = surface_title(&surface);
                 promoted.push(TabSession {
+                    parent_tab: None,
+                    children_collapsed: false,
                     title,
                     title_source: None,
                     layout: Some(LayoutNode::Pane {

@@ -3,13 +3,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use paneflow_config::schema::PaneFlowConfig;
+use paneflow_config::schema::{AgentProfileConfig, PaneFlowConfig};
 use paneflow_ipc_client::IpcTransport;
 use serde_json::{Value, json};
 
 use super::workspace_spec::{self, PaneSpec};
 use super::{CliError, EXIT_OK};
-use crate::agent_launcher::TerminalAgent;
+use crate::agent_launcher::{AgentProfile, TerminalAgent};
 use crate::workspace::worktree;
 
 pub(super) const DEFAULT_PORT_BASE: u16 = 3000;
@@ -19,11 +19,53 @@ const SETUP_STDOUT_CAP: u64 = 8 * 1024 * 1024;
 const SETUP_STDERR_TAIL_BYTES: usize = 64 * 1024;
 const SETUP_STDERR_TAIL_LINES: usize = 20;
 
-pub fn up(client: &impl IpcTransport, file: &str, dry_run: bool) -> Result<i32, CliError> {
+pub fn up(
+    client: &impl IpcTransport,
+    file: &str,
+    dry_run: bool,
+    parent: Option<&str>,
+) -> Result<i32, CliError> {
     let src = std::fs::read_to_string(file)
         .map_err(|e| CliError::runtime(format!("cannot read '{file}': {e}")))?;
-    let spec = workspace_spec::load(&src).map_err(CliError::runtime)?;
+    let mut spec = workspace_spec::load(&src).map_err(CliError::runtime)?;
+    if parent.is_some() && spec.space.is_some() {
+        return Err(CliError::runtime(
+            "a child team uses its parent's space; remove 'space' from the spec",
+        ));
+    }
+    let parent_session =
+        if parent == Some("self") {
+            Some(super::send_cmd::caller_session().ok_or_else(|| {
+                CliError::target("--parent self requires a Paneflow pane session")
+            })?)
+        } else {
+            None
+        };
+    let parent_surface_id = parent
+        .filter(|target| *target != "self")
+        .map(|target| super::selector::resolve_target(client, target))
+        .transpose()?;
 
+    let config = paneflow_config::loader::load_config();
+    if let Some(parent) = parent_surface_id
+        && config
+            .agent_profiles
+            .iter()
+            .any(|profile| profile.project.is_some())
+    {
+        let cwd = super::selector::fetch_surfaces(client)?
+            .into_iter()
+            .find(|surface| surface.surface_id == parent)
+            .and_then(|surface| surface.cwd)
+            .ok_or_else(|| {
+                CliError::target("cannot resolve the parent pane's project directory")
+            })?;
+        for pane in &mut spec.panes {
+            if pane.cwd.is_none() {
+                pane.cwd = Some(cwd.clone());
+            }
+        }
+    }
     let port_refs = validate_env_tokens(&spec.panes)?;
 
     let mut worktree_plans: Vec<Option<WorktreePlan>> = Vec::with_capacity(spec.panes.len());
@@ -35,13 +77,18 @@ pub fn up(client: &impl IpcTransport, file: &str, dry_run: bool) -> Result<i32, 
     let port_base = spec.port_base.unwrap_or(DEFAULT_PORT_BASE);
     let offsets = allocate_port_offsets(&port_refs, port_base, port_is_free)?;
 
-    let config = paneflow_config::loader::load_config();
+    if !dry_run && panes_need_orchestration(&spec.panes) {
+        ensure_orchestration_gate(client)?;
+    }
+    if spec.round_robin {
+        super::role_routing::apply(&mut spec.panes, &config, dry_run)?;
+    }
     check_space(&config, spec.space.as_deref())?;
     worktree::set_worktrees_root(config.worktrees.dir_path());
     let mut panes = Vec::with_capacity(spec.panes.len());
     for (idx, pane) in spec.panes.iter().enumerate() {
         let command = resolve_command(idx, pane, &config)?;
-        let env = substitute_env(pane.env.as_ref(), offsets[idx]);
+        let env = resolve_env(pane, &config, offsets[idx])?;
         let plan = &worktree_plans[idx];
         let cwd = match plan {
             Some(p) => Some(p.path.to_string_lossy().into_owned()),
@@ -59,21 +106,25 @@ pub fn up(client: &impl IpcTransport, file: &str, dry_run: bool) -> Result<i32, 
         }));
     }
 
-    let params = json!({
+    let mut params = json!({
         "name": spec.name,
         "space": spec.space,
         "layout": spec.layout.as_ipc(),
         "panes": panes,
     });
+    if let Some(parent) = parent_surface_id {
+        params["parent_surface_id"] = json!(parent);
+    }
+    if let Some(session) = parent_session {
+        params["parent_session"] = json!(session);
+    }
 
     if dry_run {
         super::print_json(&params)?;
         return Ok(EXIT_OK);
     }
 
-    if panes_need_orchestration(&spec.panes) {
-        ensure_orchestration_gate(client)?;
-    }
+    prepare_pane_roles(spec.panes.iter(), &config)?;
 
     let mut created_worktrees: Vec<&WorktreePlan> = Vec::new();
     for plan in worktree_plans.iter().flatten() {
@@ -618,6 +669,15 @@ pub(super) fn resolve_command(
     let Some(agent) = pane.agent.as_deref() else {
         return Ok(pane.command.clone());
     };
+    if let Some(profile) = resolve_profile(pane, config)? {
+        if !profile.agent.is_installed_now() {
+            return Err(CliError::runtime(format!(
+                "pane {idx}: agent '{}' not found on PATH",
+                profile.agent.binary()
+            )));
+        }
+        return Ok(Some(profile.launch_command(config)));
+    }
     let resolved = resolve_agent(agent)
         .ok_or_else(|| CliError::runtime(format!("pane {idx}: unknown agent '{agent}'")))?;
     if !resolved.is_installed_now() {
@@ -627,6 +687,129 @@ pub(super) fn resolve_command(
         )));
     }
     Ok(Some(resolved.launch_command(config)))
+}
+
+pub(super) fn profile_project(pane: &PaneSpec, config: &PaneFlowConfig) -> Option<PathBuf> {
+    if !config.agent_profiles.iter().any(|profile| {
+        profile.project.is_some()
+            || profile.model.as_deref() == Some(crate::agent_launcher::ORCHESTRATOR_MODEL)
+    }) && pane.model.as_deref() != Some(crate::agent_launcher::ORCHESTRATOR_MODEL)
+    {
+        return None;
+    }
+    let cwd = std::env::current_dir().ok()?;
+    let path = pane
+        .cwd
+        .as_deref()
+        .map_or(cwd.clone(), |path| cwd.join(path));
+    let path =
+        crate::runtime_paths::strip_verbatim_prefix(std::fs::canonicalize(&path).unwrap_or(path));
+    crate::workspace::git::GitLocation::probe(&path.to_string_lossy())
+        .repo_root
+        .or(Some(path))
+}
+
+pub(super) fn resolve_profile(
+    pane: &PaneSpec,
+    config: &PaneFlowConfig,
+) -> Result<Option<AgentProfile>, CliError> {
+    let Some(agent) = pane.agent.as_deref() else {
+        return Ok(None);
+    };
+    let project = profile_project(pane, config);
+    let matches: Vec<_> = config
+        .agent_profiles
+        .iter()
+        .filter(|profile| config.agent_profile_applies(profile, project.as_deref()))
+        .filter(|profile| {
+            profile.name.eq_ignore_ascii_case(agent)
+                || profile
+                    .default_profile
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(agent))
+        })
+        .collect();
+    if matches.len() > 1 {
+        return Err(CliError::runtime(format!(
+            "ambiguous agent profile '{agent}'"
+        )));
+    }
+    let mut profile = if let Some(profile) = matches.first() {
+        Some((*profile).clone())
+    } else if let Some(id) = agent.strip_prefix("agency-") {
+        let role = paneflow_mcp_install::agency::role(id)
+            .ok_or_else(|| CliError::runtime(format!("unknown Agency role '{id}'")))?;
+        let matches: Vec<_> = config
+            .agency_profiles_for_project(id, project.as_deref())
+            .collect();
+        match matches.as_slice() {
+            [] => Some(AgentProfileConfig {
+                name: format!("Agency {}", role.name),
+                agent: "claude_code".to_string(),
+                model: Some(role.default_model.to_string()),
+                agency_role: Some(id.to_string()),
+                ..AgentProfileConfig::default()
+            }),
+            [profile] => Some((*profile).clone()),
+            _ => {
+                return Err(CliError::runtime(format!(
+                    "Agency role '{id}' has multiple profiles; select a profile by name"
+                )));
+            }
+        }
+    } else {
+        None
+    };
+    if profile.is_none() && (pane.model.is_some() || pane.effort.is_some()) {
+        profile = resolve_agent(agent).map(|resolved| AgentProfileConfig {
+            name: agent.to_string(),
+            agent: resolved.tag().to_string(),
+            ..AgentProfileConfig::default()
+        });
+    }
+    profile
+        .map(|mut profile| {
+            if pane.model.is_some() {
+                profile.model = pane.model.clone();
+            }
+            if pane.effort.is_some() {
+                profile.effort = pane.effort.clone();
+            }
+            AgentProfile::for_project(&profile, config, project.as_deref())
+                .map_err(CliError::runtime)
+        })
+        .transpose()
+}
+
+pub(super) fn resolve_env(
+    pane: &PaneSpec,
+    config: &PaneFlowConfig,
+    offset: Option<u16>,
+) -> Result<Option<HashMap<String, String>>, CliError> {
+    let mut env = resolve_profile(pane, config)?
+        .map(|profile| profile.process_env())
+        .unwrap_or_default();
+    env.extend(substitute_env(pane.env.as_ref(), offset).unwrap_or_default());
+    Ok((!env.is_empty()).then_some(env))
+}
+
+pub(super) fn prepare_pane_roles<'a>(
+    panes: impl IntoIterator<Item = &'a PaneSpec>,
+    config: &PaneFlowConfig,
+) -> Result<(), CliError> {
+    let mut roles = Vec::new();
+    for pane in panes {
+        if let Some(profile) = resolve_profile(pane, config)? {
+            crate::agent_profile_context::validate_skill_paths(&profile.skills).map_err(
+                |error| CliError::runtime(format!("cannot load assigned skill: {error}")),
+            )?;
+            if let Some(role) = profile.agency_role {
+                roles.push(role);
+            }
+        }
+    }
+    crate::agent_launcher::prepare_role_ids(&roles.iter().map(String::as_str).collect::<Vec<_>>())
+        .map_err(|error| CliError::runtime(format!("cannot prepare Agency role: {error}")))
 }
 
 fn resolve_agent(name: &str) -> Option<TerminalAgent> {
@@ -644,6 +827,80 @@ mod tests {
     use crate::git_fixture as fixture;
 
     #[test]
+    fn project_profile_resolution_keeps_role_model_and_environment_together() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("felco-app");
+        std::fs::create_dir(&project).unwrap();
+        let mut entry = AgentProfile::agency_defaults()
+            .into_iter()
+            .find(|entry| entry.agency_role.as_deref() == Some("ui-designer"))
+            .unwrap();
+        let mut other = entry.clone();
+        other.name = "Other Designer".to_string();
+        other.project = Some(root.path().join("other-app"));
+        entry.name = "felco-app UI Designer".to_string();
+        entry.project = Some(project.clone());
+        entry.agent = "codex".to_string();
+        entry.model = None;
+        entry.effort = Some("high".to_string());
+        entry
+            .env
+            .insert("PROJECT_LABEL".to_string(), "felco-app".to_string());
+        let config = PaneFlowConfig {
+            agent_profiles: vec![entry, other],
+            ..Default::default()
+        };
+        let mut pane = pane(Some("agency-ui-designer"), None);
+        pane.cwd = Some(project.to_string_lossy().into_owned());
+        let profile = resolve_profile(&pane, &config).unwrap().unwrap();
+        assert_eq!(profile.agent, TerminalAgent::Codex);
+        assert!(
+            profile
+                .args
+                .iter()
+                .any(|arg| arg == "model_reasoning_effort=high")
+        );
+        assert_eq!(
+            resolve_env(&pane, &config, None).unwrap().unwrap()["PROJECT_LABEL"],
+            "felco-app"
+        );
+        pane.agent = Some("Other Designer".to_string());
+        assert!(resolve_profile(&pane, &config).unwrap().is_none());
+        pane.agent = Some("felco-app UI Designer".to_string());
+        assert_eq!(
+            resolve_profile(&pane, &config).unwrap().unwrap().agent,
+            TerminalAgent::Codex
+        );
+    }
+
+    #[test]
+    fn an_explicit_team_model_overrides_an_orchestrator_default_without_a_lead() {
+        let root = tempfile::tempdir().unwrap();
+        let config = PaneFlowConfig {
+            agent_profiles: vec![AgentProfileConfig {
+                name: "Project Designer".to_string(),
+                agent: "codex".to_string(),
+                project: Some(root.path().to_path_buf()),
+                model: Some(crate::agent_launcher::ORCHESTRATOR_MODEL.to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut pane = pane(Some("Project Designer"), None);
+        pane.cwd = Some(root.path().to_string_lossy().into_owned());
+        assert!(resolve_profile(&pane, &config).is_err());
+        pane.model = Some("gpt-reserve".to_string());
+        assert!(
+            resolve_profile(&pane, &config)
+                .unwrap()
+                .unwrap()
+                .args
+                .iter()
+                .any(|arg| arg == "gpt-reserve")
+        );
+    }
+
+    #[test]
     fn resolve_agent_accepts_aliases() {
         assert_eq!(resolve_agent("claude"), Some(TerminalAgent::ClaudeCode));
         assert_eq!(
@@ -659,8 +916,82 @@ mod tests {
         assert_eq!(resolve_agent("nope"), None);
     }
 
+    #[test]
+    fn agency_panes_use_the_saved_model_and_environment_with_explicit_overrides() {
+        let mut entry = AgentProfile::agency_defaults()
+            .into_iter()
+            .find(|entry| entry.agency_role.as_deref() == Some("ui-designer"))
+            .unwrap();
+        entry.model = Some("opus".to_string());
+        entry
+            .env
+            .insert("TEAM_ROLE".to_string(), "designer".to_string());
+        let config = PaneFlowConfig {
+            agent_profiles: vec![entry],
+            ..PaneFlowConfig::default()
+        };
+        let mut pane = pane(Some("agency-ui-designer"), None);
+        assert!(
+            resolve_profile(&pane, &config)
+                .unwrap()
+                .unwrap()
+                .args
+                .ends_with(&["--model".to_string(), "opus".to_string()])
+        );
+        pane.model = Some("haiku".to_string());
+        pane.env = Some(HashMap::from([(
+            "TEAM_ROLE".to_string(),
+            "override".to_string(),
+        )]));
+        assert!(
+            resolve_profile(&pane, &config)
+                .unwrap()
+                .unwrap()
+                .args
+                .ends_with(&["--model".to_string(), "haiku".to_string()])
+        );
+        assert_eq!(
+            resolve_env(&pane, &config, None).unwrap().unwrap()["TEAM_ROLE"],
+            "override"
+        );
+        pane.agent = Some("agency-engineering-rust-refactoring-specialist".to_string());
+        assert!(resolve_profile(&pane, &config).unwrap().is_some());
+        let mut mixed = config.clone();
+        let mut second = mixed.agent_profiles[0].clone();
+        second.name = "Codex Designer".to_string();
+        second.agent = "codex".to_string();
+        second.model = Some("gpt-6".to_string());
+        second.effort = Some("high".to_string());
+        mixed.agent_profiles.push(second);
+        pane.agent = Some("agency-ui-designer".to_string());
+        pane.model = None;
+        assert!(resolve_profile(&pane, &mixed).is_err());
+        pane.agent = Some("Codex Designer".to_string());
+        let codex = resolve_profile(&pane, &mixed).unwrap().unwrap();
+        assert_eq!(codex.agent, TerminalAgent::Codex);
+        assert!(
+            codex
+                .args
+                .iter()
+                .any(|value| value == "model_reasoning_effort=high")
+        );
+        pane.effort = Some("low".to_string());
+        assert!(
+            resolve_profile(&pane, &mixed)
+                .unwrap()
+                .unwrap()
+                .args
+                .iter()
+                .any(|value| value == "model_reasoning_effort=low")
+        );
+        pane.agent = Some("agency-unknown".to_string());
+        assert!(resolve_profile(&pane, &config).is_err());
+    }
+
     fn pane(agent: Option<&str>, command: Option<&str>) -> PaneSpec {
         PaneSpec {
+            model: None,
+            effort: None,
             cwd: None,
             agent: agent.map(str::to_string),
             command: command.map(str::to_string),
@@ -986,7 +1317,7 @@ mod tests {
         let fake = RecordingTransport(std::cell::RefCell::new(Vec::new()));
 
         assert_eq!(
-            up(&fake, file.to_str().expect("utf-8 path"), false).expect("ok"),
+            up(&fake, file.to_str().expect("utf-8 path"), false, None).expect("ok"),
             EXIT_OK
         );
 
@@ -1022,7 +1353,7 @@ mod tests {
         )
         .expect("write spec");
         let fake = RecordingTransport(std::cell::RefCell::new(Vec::new()));
-        let err = up(&fake, file.to_str().expect("utf-8 path"), false).expect_err("refused");
+        let err = up(&fake, file.to_str().expect("utf-8 path"), false, None).expect_err("refused");
         assert_eq!(err.message, "unknown space: no-such-space-7f3a9c");
         assert!(fake.0.borrow().is_empty());
     }

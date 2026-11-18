@@ -9,8 +9,10 @@
 )]
 
 mod agent_launcher;
+mod agent_profile_context;
 mod agent_resume;
 mod agent_sessions;
+mod agent_setup;
 mod agent_updates;
 mod agents;
 mod ai_hooks;
@@ -221,6 +223,7 @@ struct PaneFlowApp {
     git_watch_counts: std::collections::HashMap<std::path::PathBuf, usize>,
     git_probed_at: std::collections::HashMap<String, std::time::Instant>,
     settings_section: Option<SettingsSection>,
+    agent_profiles_project: Option<std::path::PathBuf>,
     settings_scroll: gpui::ScrollHandle,
     settings_drag: Option<crate::widgets::scrollbar::ScrollDragState>,
     settings_search_input: gpui::Entity<crate::widgets::text_input::TextInput>,
@@ -239,6 +242,8 @@ struct PaneFlowApp {
     workspace_pane_command_input: gpui::Entity<crate::widgets::text_input::TextInput>,
     workspace_pane_prompt_input: gpui::Entity<crate::widgets::text_input::TextInput>,
     agent_profile_editor: Option<crate::settings::tabs::agents::AgentProfileEditor>,
+    agent_profiles_busy: bool,
+    agent_setup_review: Option<crate::agent_setup::ImportReview>,
     agents_list_expanded: bool,
     agents_list_animation: Option<SidebarWidthAnimation>,
     integration_status: Option<Vec<paneflow_mcp_install::IntegrationStatus>>,

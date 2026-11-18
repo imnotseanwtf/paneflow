@@ -15,12 +15,14 @@ impl PaneFlowApp {
     ) {
         self.workspace_menu_open = None;
         self.settings_section = Some(section);
+        self.agent_profiles_project = None;
         self.reset_settings_scroll();
         self.terminal_dropdown = None;
         self.general_dropdown = None;
         self.workspace_template_dropdown = None;
         self.workspace_template_detail_open = false;
         self.agent_profile_editor = None;
+        self.agent_setup_review = None;
         self.space_name_editor = None;
         self.space_delete_armed = None;
         self.space_settings_expanded = None;
@@ -71,6 +73,7 @@ impl PaneFlowApp {
 
     pub(crate) fn close_settings(&mut self, cx: &mut Context<Self>) {
         self.settings_section = None;
+        self.agent_profiles_project = None;
         self.clear_shortcut_filters(cx);
         self.shortcut_reset_armed_at = None;
         self.font_dropdown_open = false;
@@ -81,6 +84,7 @@ impl PaneFlowApp {
         self.workspace_template_dropdown = None;
         self.workspace_template_detail_open = false;
         self.agent_profile_editor = None;
+        self.agent_setup_review = None;
         self.space_name_editor = None;
         self.space_delete_armed = None;
         self.space_settings_expanded = None;
@@ -351,6 +355,25 @@ impl PaneFlowApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if event.keystroke.key == "escape"
+            && self.agent_profile_editor.as_ref().is_some_and(|editor| {
+                editor.role_menu_open
+                    || editor.model_menu_open
+                    || editor.effort_menu_open
+                    || editor.agent_menu_open
+            })
+        {
+            if let Some(editor) = self.agent_profile_editor.as_mut() {
+                editor.role_menu_open = false;
+                editor.model_menu_open = false;
+                editor.effort_menu_open = false;
+                editor.agent_menu_open = false;
+            }
+            self.settings_focus.focus(window, cx);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         let modifiers = event.keystroke.modifiers;
         if self.settings_section == Some(SettingsSection::Usage)
             && event.keystroke.key == "tab"

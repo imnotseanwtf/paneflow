@@ -106,6 +106,7 @@ jobs:
               - 'clippy.toml'
               - '.config/nextest.toml'
               - 'assets/PaneFlow.ico'
+              - 'assets/agency-agents/**'
               - 'packaging/wix/main.wxs'
               - 'docs/user/configuration/schema.md'
             ci:
