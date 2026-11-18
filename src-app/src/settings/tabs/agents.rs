@@ -2614,6 +2614,19 @@ impl PaneFlowApp {
                 ),
             )
             .row(
+                &search::CODEX_FULL_ACCESS,
+                toggle_row(
+                    "row-codex-bypass",
+                    search::CODEX_FULL_ACCESS.title,
+                    search::CODEX_FULL_ACCESS.description,
+                    None,
+                    self.cached_config.codex_bypass_permissions.unwrap_or(false),
+                    "codex_bypass_permissions",
+                    ui,
+                    cx,
+                ),
+            )
+            .row(
                 &search::AI_FREE_ACCESS,
                 toggle_row(
                     "row-ai-unrestricted",

@@ -30,7 +30,7 @@ remain available in [`paneflow.json`](/docs/configuration/schema).
 | Workspaces | Reusable workspace templates with panes, agents, shell commands, cwd, env, and prompt prefill. | `commands[].workspace` | Templates run through the same workspace launch path as `paneflow up`. |
 | Spaces | The spaces that group workspaces: `Default` first, then each space with its name, image, color, environment variables, the state of the Claude Code and Codex hooks and MCP in the config directories it sets, and a delete action that moves its workspaces to `Default` after a confirmation. Up to 9 spaces. | `spaces`; images go to `avatars/` in the Paneflow home | Names, images, and colors hot-reload. An environment applies to terminals opened after the change. |
 | Worktrees | Root directory for the worktrees Paneflow creates, automatic removal with a keep limit, the list of managed worktrees with a remove action, and the snapshots taken before a removal with restore and delete actions. | `worktrees.dir`, `worktrees.auto_remove`, `worktrees.keep_limit` | Hot-reloads. The root applies to worktrees created from then on. |
-| Agents | Which agents the launcher shows, with their installed version and hook state, an **Install hooks** button for Claude Code and Codex, custom agent profiles, Claude Code full access, AI free access, and the injection fence. | `*_button_visible`, `agent_profiles`, `claude_code_bypass_permissions`, `ai_unrestricted`, `ai_injection_fence`; **Install hooks** writes the agent's own hook config | Launcher and access changes hot-reload. |
+| Agents | Which agents the launcher shows, with their installed version and hook state, an **Install hooks** button for Claude Code and Codex, custom agent profiles, Claude Code and Codex full access, AI free access, and the injection fence. | `*_button_visible`, `agent_profiles`, `claude_code_bypass_permissions`, `codex_bypass_permissions`, `ai_unrestricted`, `ai_injection_fence`; **Install hooks** writes the agent's own hook config | Launcher and access changes hot-reload. |
 | Plugins | Installs or repairs the bundled `paneflow-mcp` bridge for Claude Code, Codex, Gemini, and opencode. | Agent config files, not `paneflow.json` | Re-run after a Paneflow update or when an agent config changes. |
 
 ## Interface style
@@ -263,6 +263,10 @@ automation a trusted conductor can perform.
 enabled, Paneflow launches Claude Code with
 `--permission-mode bypassPermissions`. It does not change Codex,
 OpenCode, Gemini, or MCP behavior.
+
+**Full access for Codex** applies `codex_bypass_permissions` to the next
+Codex session launched by Paneflow. It disables Codex command approval
+prompts and the Codex sandbox.
 
 Plugins is a separate operational page. It registers the bundled
 `paneflow-mcp` server so supported agents can list, read, and search

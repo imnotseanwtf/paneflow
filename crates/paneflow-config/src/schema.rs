@@ -108,6 +108,7 @@ mod tests {
             submit_paste_delay_ms: Some(70),
             external_editor: Some("auto".to_string()),
             claude_code_bypass_permissions: Some(false),
+            codex_bypass_permissions: Some(false),
             ai_unrestricted: Some(true),
             ai_injection_fence: Some(false),
             on_quit: Some(OnQuit::Stop),

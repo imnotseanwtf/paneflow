@@ -451,6 +451,11 @@
       "description": "When true, the built-in 'Claude Code' tab-bar button launches the CLI with --permission-mode bypassPermissions, disabling all permission prompts. Per Anthropic's docs this mode offers no protection against prompt injection - opt in only on machines where that risk is acceptable.",
       "default": false
     },
+    "codex_bypass_permissions": {
+      "type": ["boolean", "null"],
+      "description": "When true, Paneflow launches Codex with --dangerously-bypass-approvals-and-sandbox, disabling command approvals and sandboxing.",
+      "default": false
+    },
     "ai_unrestricted": {
       "type": ["boolean", "null"],
       "description": "AI free-access mode. When true, a conductor (a CLI agent or external orchestrator) may auto-submit prompts to other panes (surface.send_text submit:true) WITHOUT the PANEFLOW_IPC_SCRIPTING env gate. Null/false (default) keeps the current behavior strictly unchanged. Re-evaluated per call, so toggling it off revokes the capability with no residual access.",

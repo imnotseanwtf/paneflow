@@ -53,6 +53,7 @@ fn test_serialization_roundtrip() {
         shell_integration: None,
         submit_paste_delay_ms: None,
         claude_code_bypass_permissions: None,
+        codex_bypass_permissions: None,
         ai_unrestricted: None,
         ai_injection_fence: None,
         on_quit: None,

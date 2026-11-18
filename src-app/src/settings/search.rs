@@ -205,6 +205,10 @@ pub(crate) const CLAUDE_FULL_ACCESS: SettingCopy = SettingCopy {
     description: "Edits any file and runs networked commands without asking. No protection \
                   against prompt injection.",
 };
+pub(crate) const CODEX_FULL_ACCESS: SettingCopy = SettingCopy {
+    title: "Full access for Codex",
+    description: "Launches Codex with command approvals and sandboxing disabled.",
+};
 pub(crate) const AI_FREE_ACCESS: SettingCopy = SettingCopy {
     title: "AI free access",
     description: "Lets an agent auto-submit prompts to your other panes, without the \
@@ -319,7 +323,12 @@ const USAGE_COPIES: &[&SettingCopy] = &[
     &USAGE_SIDEBAR_CODEX,
     &USAGE_ACTIVITY,
 ];
-const AGENTS_COPIES: &[&SettingCopy] = &[&CLAUDE_FULL_ACCESS, &AI_FREE_ACCESS, &INJECTION_FENCE];
+const AGENTS_COPIES: &[&SettingCopy] = &[
+    &CLAUDE_FULL_ACCESS,
+    &CODEX_FULL_ACCESS,
+    &AI_FREE_ACCESS,
+    &INJECTION_FENCE,
+];
 
 const GENERAL_HEADERS: &[&str] = &["Defaults", "Notifications"];
 #[cfg(target_os = "windows")]

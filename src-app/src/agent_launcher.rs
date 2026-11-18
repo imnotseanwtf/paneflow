@@ -160,6 +160,8 @@ impl TerminalAgent {
         {
             spec.push_arg("--permission-mode");
             spec.push_arg("bypassPermissions");
+        } else if self == TerminalAgent::Codex && config.codex_bypass_permissions.unwrap_or(false) {
+            spec.push_arg("--dangerously-bypass-approvals-and-sandbox");
         }
     }
 
@@ -977,6 +979,22 @@ mod tests {
             TerminalAgent::ClaudeCode.command(&on),
             "claude --permission-mode bypassPermissions"
         );
+    }
+
+    #[test]
+    fn codex_bypass_flag_is_opt_in_and_codex_only() {
+        let default_config = PaneFlowConfig::default();
+        assert_eq!(TerminalAgent::Codex.command(&default_config), "codex");
+
+        let config = PaneFlowConfig {
+            codex_bypass_permissions: Some(true),
+            ..default_config
+        };
+        assert_eq!(
+            TerminalAgent::Codex.command(&config),
+            "codex --dangerously-bypass-approvals-and-sandbox"
+        );
+        assert_eq!(TerminalAgent::ClaudeCode.command(&config), "claude");
     }
 
     #[test]

@@ -78,6 +78,8 @@ pub struct PaneFlowConfig {
     pub external_editor: Option<String>,
     #[serde(default, deserialize_with = "lenient_value_or_default")]
     pub claude_code_bypass_permissions: Option<bool>,
+    #[serde(default, deserialize_with = "lenient_value_or_default")]
+    pub codex_bypass_permissions: Option<bool>,
     #[serde(default, deserialize_with = "lenient_opt_bool")]
     pub ai_unrestricted: Option<bool>,
     #[serde(default, deserialize_with = "lenient_opt_bool")]

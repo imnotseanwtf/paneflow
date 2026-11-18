@@ -87,6 +87,7 @@ JetBrains IDEs, Helix, and other JSON Schema-aware editors:
 | `agent_profiles` | array | `[]` | Hot reload | Custom launcher entries that run a built-in agent with extra environment variables and arguments, for example a second Claude Code account through `CLAUDE_CONFIG_DIR`. Settings > Agents > Profiles edits the same list. |
 | `spaces` | array | `[]` | Hot reload | Named groups of workspaces, at most 9. The sidebar lists only the active space's workspaces. See [`spaces`](#spaces). |
 | `claude_code_bypass_permissions` | boolean/null | `false` | Next Claude launch | Adds `--permission-mode bypassPermissions` to the Claude Code launcher. High-risk opt-in. |
+| `codex_bypass_permissions` | boolean/null | `false` | Next Codex launch | Adds `--dangerously-bypass-approvals-and-sandbox` to Paneflow Codex launches. Disables command approvals and sandboxing. |
 | `ai_unrestricted` | boolean/null | `false` | Per IPC call | Allows trusted conductors to submit to peer panes without `PANEFLOW_IPC_SCRIPTING`. |
 | `ai_injection_fence` | boolean/null | `true` | Per read call | Wraps `surface.read` output in an untrusted-output fence by default. |
 | `on_quit` | `ask`, `keep`, `stop`, null | `ask` | At quit | What quitting does while hosted sessions run: `ask` opens the quit dialog, `keep` leaves every session running, `stop` stops them all and shuts the host down. With no live session the app exits and shuts the idle host down. |
