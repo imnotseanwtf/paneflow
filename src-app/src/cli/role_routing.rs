@@ -189,7 +189,10 @@ mod tests {
     #[test]
     fn project_role_rotation_uses_separate_pools_and_cursors() {
         let root = tempfile::tempdir().unwrap();
-        let projects = [root.path().join("felco-app"), root.path().join("other-app")];
+        let base = crate::runtime_paths::strip_verbatim_prefix(
+            std::fs::canonicalize(root.path()).unwrap(),
+        );
+        let projects = [base.join("felco-app"), base.join("other-app")];
         let mut scoped = config();
         scoped.agent_profiles.clear();
         for project in &projects {

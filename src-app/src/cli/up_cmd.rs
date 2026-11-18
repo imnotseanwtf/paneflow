@@ -829,7 +829,10 @@ mod tests {
     #[test]
     fn project_profile_resolution_keeps_role_model_and_environment_together() {
         let root = tempfile::tempdir().unwrap();
-        let project = root.path().join("felco-app");
+        let base = crate::runtime_paths::strip_verbatim_prefix(
+            std::fs::canonicalize(root.path()).unwrap(),
+        );
+        let project = base.join("felco-app");
         std::fs::create_dir(&project).unwrap();
         let mut entry = AgentProfile::agency_defaults()
             .into_iter()
@@ -837,7 +840,7 @@ mod tests {
             .unwrap();
         let mut other = entry.clone();
         other.name = "Other Designer".to_string();
-        other.project = Some(root.path().join("other-app"));
+        other.project = Some(base.join("other-app"));
         entry.name = "felco-app UI Designer".to_string();
         entry.project = Some(project.clone());
         entry.agent = "codex".to_string();
@@ -876,18 +879,21 @@ mod tests {
     #[test]
     fn an_explicit_team_model_overrides_an_orchestrator_default_without_a_lead() {
         let root = tempfile::tempdir().unwrap();
+        let base = crate::runtime_paths::strip_verbatim_prefix(
+            std::fs::canonicalize(root.path()).unwrap(),
+        );
         let config = PaneFlowConfig {
             agent_profiles: vec![AgentProfileConfig {
                 name: "Project Designer".to_string(),
                 agent: "codex".to_string(),
-                project: Some(root.path().to_path_buf()),
+                project: Some(base.clone()),
                 model: Some(crate::agent_launcher::ORCHESTRATOR_MODEL.to_string()),
                 ..Default::default()
             }],
             ..Default::default()
         };
         let mut pane = pane(Some("Project Designer"), None);
-        pane.cwd = Some(root.path().to_string_lossy().into_owned());
+        pane.cwd = Some(base.to_string_lossy().into_owned());
         assert!(resolve_profile(&pane, &config).is_err());
         pane.model = Some("gpt-reserve".to_string());
         assert!(
